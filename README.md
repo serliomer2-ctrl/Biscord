@@ -15,7 +15,39 @@ Kendi sunucunda çalışan, gerçek zamanlı sohbet + sesli/görüntülü konuş
 | **Arkadaşlar** | İstek gönder/kabul et/reddet, çevrimiçi listesi, "Şu An Aktif" |
 | **Yönetim** | Roller (renk, ayrı gösterim, 18 izin), rol hiyerarşisi, at, yasakla, takma ad |
 | **Botlar** | Bot hesapları, token, REST API + gerçek zamanlı olaylar, `/` komut kaydı ve otomatik tamamlama, embed mesajlar, örnek bot |
+| **Kendi Botunu Yap** | Kod bilmeden, sürükle-bırak blokla "EĞER → O ZAMAN" kuralları: otomatik cevap, karşılama, küfür/link/spam filtresi, rol/coin verme, zaman aşımı |
+| **Güvenlik** | E-postayla şifre sıfırlama, e-posta doğrulama, Authenticator (Google/Microsoft) ile 2FA + yedek kodlar, e-postayla giriş kodu, diğer oturumları kapatma |
+| **Yönetim Paneli** | `admin` hesabı (ilk girişte şifre değişimi zorunlu): istatistikler, siteden yasaklama/susturma, şifre sıfırlama, 2FA kapatma, sunucu/mesaj denetimi, site duyurusu, kayıtları kapatma, işlem kayıtları |
+| **Uygulama** | Telefona (Android/iPhone) ve bilgisayara (Windows/Mac) kurulabilir uygulama (PWA), uygulama kapalıyken bile anlık bildirimler |
+| **Etkinlikler** | Kanal içinde birlikte oynanan mini oyunlar: Bilgi Yarışması, ASCII Yılan, Arena; YouTube/video **Birlikte İzle** (senkron oynat/durdur/sar) |
+| **Ses Eğlencesi** | Ses efekt paneli (8 hazır + kendi kaydettiğin/yüklediğin sesler), ses filtreleri (robot, çipmunk, derin bas, megafon, telsiz), bas-konuş ve telsiz modu, klip kaydedici (son ~30 sn, Alt+C) |
+| **Etkileşim** | Canlı anketler, ortak yapılacaklar listesi, JavaScript/Python kod bloklarını tek tuşla çalıştırma, sözdizimi renklendirme |
+| **Ekonomi** | Sunucu içi Biscord Coin ve seviye sistemi, günlük ödül, mağaza (renkli isim, unvan, neon parıltı), sıralama, coin gönderme |
+| **Gizlilik** | 👻 Hayalet kanallar: listede görünmez, şifreyle açılır, mesajlar hiçbir yere kaydedilmez |
+| **Dosyalar** | Sınırsız boyutta doğrudan (P2P) dosya aktarımı, 3D model (.stl/.obj) ve kod dosyası önizleme |
+| **Kişiselleştirme** | Tema motoru (vurgu rengi, arka plan resmi, cam/bulanıklık, yazı tipi, neon, özel CSS), hazır temalar, ⚡ Ultra Hafif Mod, sayaçlı özel durum (Rich Presence) |
 | **Diğer** | Masaüstü bildirimleri, sesler, koyu/açık tema, Ctrl+K hızlı geçiş, mobil uyumlu |
+
+### İlk yönetici girişi
+
+Sunucu ilk kez çalıştığında bir yönetici hesabı oluşturur:
+
+- **Kullanıcı adı:** `admin`
+- **Şifre:** `admin`
+
+İlk girişte **yeni bir şifre belirlemek zorunludur**; değiştirilmeden hiçbir yere erişilemez. Yönetim Paneli'ne sol alttaki profil → **Yönetim Paneli** ya da Ayarlar → **🛡️ Yönetim Paneli** ile ulaşılır.
+
+### Yeni `/` komutları
+
+`/anket`, `/yapilacaklar`, `/oyun`, `/izle <bağlantı>`, `/kod`, `/gunluk`, `/bakiye`, `/magaza`, `/siralama`, `/ghost <şifre>`, `/durum`
+
+### Bilinmesi gerekenler
+
+- **SMS doğrulama yok:** Ücretsiz bir SMS sağlayıcısı bulunmadığı için eklenmedi. Onun yerine ücretsiz ve daha güvenli olan Authenticator uygulaması desteği var.
+- **E-posta özellikleri** için `.env` dosyasında SMTP ayarları gerekir (bkz. `.env.example`). Ayarlanmazsa kodlar sunucu kayıtlarına yazılır.
+- **Klipler** MP4 veya WebM olarak kaydedilir (tarayıcıda GIF dönüştürme çok ağır olduğu için yok).
+- **Kod çalıştırıcı** kodu tarayıcıda yalıtılmış bir Web Worker'da çalıştırır (JS 5 sn, Python 60 sn sınırı). Python ilk kullanımda ~10 MB indirir.
+- **P2P aktarımda** gönderen kişinin sekmesi açık kalmalıdır; dosya sunucuya yüklenmez.
 
 ## Yerelde çalıştırma
 

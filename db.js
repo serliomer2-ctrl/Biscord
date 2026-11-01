@@ -168,6 +168,83 @@ CREATE TABLE IF NOT EXISTS read_states (
 );
 `);
 
+// ---------------------------------------------------------------- sürüm 2 eklemeleri (mevcut veriler korunur)
+function addColumn(table, col, def) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+}
+for (const [col, def] of [
+  ['email', 'TEXT'], ['email_verified', 'INTEGER DEFAULT 0'], ['totp_secret', 'TEXT'], ['totp_enabled', 'INTEGER DEFAULT 0'],
+  ['email_2fa', 'INTEGER DEFAULT 0'], ['backup_codes', "TEXT DEFAULT '[]'"], ['is_admin', 'INTEGER DEFAULT 0'],
+  ['must_change_password', 'INTEGER DEFAULT 0'], ['banned', 'INTEGER DEFAULT 0'], ['ban_reason', 'TEXT'],
+  ['muted_until', 'INTEGER'], ['presence', 'TEXT'],
+]) addColumn('users', col, def);
+for (const [col, def] of [
+  ['xp', 'INTEGER DEFAULT 0'], ['coins', 'INTEGER DEFAULT 0'], ['last_xp_at', 'INTEGER DEFAULT 0'], ['last_daily_at', 'INTEGER DEFAULT 0'],
+  ['name_color', 'TEXT'], ['title', 'TEXT'], ['title_until', 'INTEGER'], ['glow_until', 'INTEGER'], ['timeout_until', 'INTEGER'],
+]) addColumn('members', col, def);
+addColumn('servers', 'economy', 'INTEGER DEFAULT 1');
+addColumn('servers', 'watch_party', 'INTEGER DEFAULT 1');
+addColumn('servers', 'activities', 'INTEGER DEFAULT 1');
+addColumn('channels', 'password_hash', 'TEXT');
+addColumn('messages', 'components', 'TEXT');
+
+db.exec(`
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email COLLATE NOCASE) WHERE email IS NOT NULL;
+CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE IF NOT EXISTS email_codes (
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  purpose TEXT NOT NULL,
+  code_hash TEXT NOT NULL,
+  email TEXT,
+  expires_at INTEGER NOT NULL,
+  attempts INTEGER DEFAULT 0,
+  PRIMARY KEY (user_id, purpose)
+);
+CREATE TABLE IF NOT EXISTS mfa_tickets (
+  ticket_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at INTEGER NOT NULL,
+  attempts INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS push_subs (
+  endpoint TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_push_user ON push_subs(user_id);
+CREATE TABLE IF NOT EXISTS audit_log (
+  id TEXT PRIMARY KEY,
+  actor_id TEXT,
+  action TEXT NOT NULL,
+  target TEXT,
+  details TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS soundboard (
+  id TEXT PRIMARY KEY,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  emoji TEXT,
+  url TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS automations (
+  id TEXT PRIMARY KEY,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  enabled INTEGER DEFAULT 1,
+  trigger_type TEXT NOT NULL,
+  trigger_value TEXT,
+  actions TEXT NOT NULL DEFAULT '[]',
+  created_by TEXT,
+  created_at INTEGER NOT NULL
+);
+`);
+
 const cache = new Map();
 function stmt(sql) {
   let s = cache.get(sql);

@@ -1,15 +1,51 @@
-// WebRTC ile sesli / görüntülü sohbet ve ekran paylaşımı (mesh topolojisi, "perfect negotiation")
+// WebRTC ile sesli / görüntülü sohbet ve ekran paylaşımı (mesh topolojisi, "perfect negotiation").
+// Giden ses bir WebAudio grafiğinden geçer: mikrofon → kapı (sustur/bas-konuş) → ses filtresi → çıkış
+// Ses efektleri (soundboard) ve telsiz bipleri aynı çıkışa karışır.
 import { store, playSound } from './util.js';
+
+const PITCH_WORKLET = `
+class PitchShifter extends AudioWorkletProcessor {
+  static get parameterDescriptors() { return [{ name: 'ratio', defaultValue: 1 }]; }
+  constructor() { super(); this.size = 8192; this.buf = new Float32Array(this.size); this.w = 0; this.phase = 0; }
+  read(pos) { pos = ((pos % this.size) + this.size) % this.size; const i = Math.floor(pos); const f = pos - i; const a = this.buf[i]; const b = this.buf[(i + 1) % this.size]; return a + (b - a) * f; }
+  process(inputs, outputs, params) {
+    const inp = inputs[0] && inputs[0][0]; const out = outputs[0][0];
+    if (!inp) return true;
+    const ratio = params.ratio[0]; const win = 2048;
+    for (let i = 0; i < inp.length; i++) {
+      this.buf[this.w] = inp[i];
+      this.phase += (1 - ratio) / win;
+      if (this.phase >= 1) this.phase -= 1; if (this.phase < 0) this.phase += 1;
+      const p2 = (this.phase + 0.5) % 1;
+      const g1 = Math.sin(Math.PI * this.phase); const g2 = Math.sin(Math.PI * p2);
+      out[i] = this.read(this.w - this.phase * win) * g1 * g1 + this.read(this.w - p2 * win) * g2 * g2;
+      this.w = (this.w + 1) % this.size;
+    }
+    for (let c = 1; c < outputs[0].length; c++) outputs[0][c].set(out);
+    return true;
+  }
+}
+registerProcessor('pitch-shifter', PitchShifter);`;
+
+export const VOICE_FILTERS = {
+  none: 'Filtre yok',
+  robot: '🤖 Robot',
+  chipmunk: '🐿️ Çipmunk',
+  deep: '🎚️ Derin Bas',
+  megaphone: '📢 Megafon',
+  radio: '📻 Telsiz (lo-fi)',
+};
 
 export class VoiceClient {
   constructor({ socket, meId, iceServers, onChange, onSpeaking, toast }) {
     Object.assign(this, { socket, meId, iceServers, onChange, onSpeaking, toast });
     this.channelId = null;
     this.serverId = null;
-    this.peers = new Map();       // uid -> { pc, polite, makingOffer, ignoreOffer, audio, videoStream, videoSender }
-    this.localStream = null;
+    this.peers = new Map();
+    this.rawMic = null;        // mikrofondan gelen ham akış
+    this.localStream = null;   // karşıya giden (işlenmiş) akış
     this.videoStream = null;
-    this.videoKind = null;        // 'camera' | 'screen'
+    this.videoKind = null;
     this.muted = store.get('muted', false);
     this.deafened = store.get('deafened', false);
     this.serverMuted = false;
@@ -18,30 +54,213 @@ export class VoiceClient {
     this.speaking = new Set();
     this.analysers = new Map();
     this.volumes = store.get('volumes', {});
+    this.mode = store.get('voiceMode', 'vad');      // vad | ptt | walkie
+    this.pttKey = store.get('pttKey', 'Backquote');
+    this.filter = store.get('voiceFilter', 'none');
+    this.pttActive = false;
     this.ctx = null;
+    this.g = null;             // ses grafiği düğümleri
     this.timer = null;
     this.joining = false;
 
     socket.on('voice:signal', ({ from, data }) => this.onSignal(from, data).catch((e) => console.warn('signal', e)));
     socket.on('voice:force-leave', () => { if (this.channelId) { this.cleanup(); this.toast('Ses bağlantın kesildi'); } });
+
+    addEventListener('keydown', (e) => {
+      if (!this.channelId || this.mode === 'vad' || e.code !== this.pttKey || e.repeat) return;
+      if (e.target.closest?.('input, textarea, select, [contenteditable]')) return;
+      e.preventDefault();
+      this.setPtt(true);
+    });
+    addEventListener('keyup', (e) => { if (e.code === this.pttKey) this.setPtt(false); });
+    addEventListener('blur', () => this.setPtt(false));
   }
 
   get connected() { return !!this.channelId; }
 
+  // ---------------------------------------------------------------- ses grafiği
+  async ensureAudio() {
+    this.ctx ||= new (window.AudioContext || window.webkitAudioContext)();
+    if (this.ctx.state === 'suspended') await this.ctx.resume().catch(() => {});
+    if (!this.workletReady && this.ctx.audioWorklet) {
+      this.workletReady = this.ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([PITCH_WORKLET], { type: 'application/javascript' }))).catch(() => null);
+    }
+    await this.workletReady;
+    return this.ctx;
+  }
+
+  buildGraph() {
+    const c = this.ctx;
+    const g = {};
+    g.dest = c.createMediaStreamDestination();
+    g.out = c.createGain();
+    g.out.connect(g.dest);
+    g.gate = c.createGain();
+    g.filterIn = c.createGain();
+    g.filterOut = c.createGain();
+    g.gate.connect(g.filterIn);
+    g.filterOut.connect(g.out);
+    g.sfx = c.createGain();
+    g.sfx.gain.value = store.get('sfxVolume', 0.8);
+    g.sfx.connect(g.out);
+    g.monitor = c.createGain();
+    g.monitor.gain.value = 0.5;
+    g.sfx.connect(g.monitor);
+    g.monitor.connect(c.destination);
+    this.g = g;
+    this.applyFilter();
+    this.localStream = g.dest.stream;
+  }
+
+  attachMic(stream) {
+    if (this.g.src) { try { this.g.src.disconnect(); } catch { /* yok */ } }
+    this.g.src = null;
+    this.rawMic = stream;
+    if (stream?.getAudioTracks().length) {
+      this.g.src = this.ctx.createMediaStreamSource(stream);
+      this.g.src.connect(this.g.gate);
+      this.monitor(this.meId, null, this.g.gate);
+    }
+  }
+
+  applyFilter() {
+    const g = this.g;
+    if (!g) return;
+    const c = this.ctx;
+    try { g.filterIn.disconnect(); } catch { /* yok */ }
+    (g.fx || []).forEach((n) => { try { n.disconnect(); if (n.stop) n.stop(); } catch { /* yok */ } });
+    g.fx = [];
+    const chain = (...nodes) => {
+      let prev = g.filterIn;
+      for (const n of nodes) { prev.connect(n); prev = n; g.fx.push(n); }
+      prev.connect(g.filterOut);
+    };
+    const shaper = (amount) => {
+      const ws = c.createWaveShaper();
+      const curve = new Float32Array(1024);
+      for (let i = 0; i < 1024; i++) { const x = (i / 512) - 1; curve[i] = ((1 + amount) * x) / (1 + amount * Math.abs(x)); }
+      ws.curve = curve;
+      return ws;
+    };
+    const biquad = (type, freq, q = 0.7, gain = 0) => { const b = c.createBiquadFilter(); b.type = type; b.frequency.value = freq; b.Q.value = q; b.gain.value = gain; return b; };
+    const pitch = (ratio) => {
+      if (!this.workletReady || typeof AudioWorkletNode === 'undefined') return c.createGain();
+      try { const n = new AudioWorkletNode(c, 'pitch-shifter'); n.parameters.get('ratio').value = ratio; return n; } catch { return c.createGain(); }
+    };
+    const f = this.filter;
+    if (f === 'robot') {
+      const ring = c.createGain();
+      ring.gain.value = 0;
+      const osc = c.createOscillator();
+      osc.frequency.value = 50;
+      osc.connect(ring.gain);
+      osc.start();
+      g.fx.push(osc);
+      const boost = c.createGain();
+      boost.gain.value = 1.8;
+      chain(ring, boost);
+    } else if (f === 'chipmunk') chain(pitch(1.65), biquad('highpass', 180));
+    else if (f === 'deep') chain(pitch(0.68), biquad('lowshelf', 220, 0.7, 9));
+    else if (f === 'megaphone') chain(biquad('highpass', 600), biquad('lowpass', 3200), shaper(25), (() => { const gg = c.createGain(); gg.gain.value = 0.7; return gg; })());
+    else if (f === 'radio') chain(biquad('bandpass', 1500, 1.4), shaper(8), (() => { const gg = c.createGain(); gg.gain.value = 1.6; return gg; })());
+    else g.filterIn.connect(g.filterOut);
+  }
+
+  setFilter(name) {
+    this.filter = VOICE_FILTERS[name] ? name : 'none';
+    store.set('voiceFilter', this.filter);
+    this.applyFilter();
+    this.onChange();
+  }
+
+  setMode(mode) {
+    this.mode = ['vad', 'ptt', 'walkie'].includes(mode) ? mode : 'vad';
+    store.set('voiceMode', this.mode);
+    if (this.mode === 'walkie' && this.filter === 'none') this.setFilter('radio');
+    this.pttActive = false;
+    this.applyMute();
+    this.onChange();
+  }
+
+  setPttKey(code) { this.pttKey = code; store.set('pttKey', code); }
+
+  setPtt(on) {
+    if (this.mode === 'vad' || this.pttActive === on || !this.channelId) return;
+    this.pttActive = on;
+    if (this.mode === 'walkie') this.walkieBeep(on);
+    this.applyMute();
+    this.onChange();
+  }
+
+  // Telsiz: basınca kısa bip, bırakınca "ksst" cızırtısı
+  walkieBeep(start) {
+    if (!this.ctx || !this.g) return;
+    const c = this.ctx;
+    const t = c.currentTime + 0.01;
+    const dest = c.createGain();
+    dest.connect(this.g.out);
+    dest.connect(this.g.monitor);
+    if (start) {
+      const o = c.createOscillator();
+      const env = c.createGain();
+      o.frequency.value = 1750;
+      env.gain.setValueAtTime(0.0001, t);
+      env.gain.exponentialRampToValueAtTime(0.25, t + 0.01);
+      env.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+      o.connect(env).connect(dest);
+      o.start(t);
+      o.stop(t + 0.14);
+    } else {
+      const len = Math.floor(c.sampleRate * 0.28);
+      const buf = c.createBuffer(1, len, c.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+      const s = c.createBufferSource();
+      s.buffer = buf;
+      const bp = c.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = 2500;
+      const env = c.createGain();
+      env.gain.value = 0.18;
+      s.connect(bp).connect(env).connect(dest);
+      s.start(t);
+    }
+    setTimeout(() => dest.disconnect(), 600);
+  }
+
+  // Ses efekti çal (bağlıysan herkes duyar; değilsen yalnızca önizleme)
+  async playEffect(buffer, meta) {
+    await this.ensureAudio();
+    const c = this.ctx;
+    const s = c.createBufferSource();
+    s.buffer = buffer;
+    if (this.channelId && this.g && !this.deafened) {
+      s.connect(this.g.sfx);
+      if (meta) this.socket.emit('sound:played', meta);
+    } else {
+      const pv = c.createGain();
+      pv.gain.value = 0.7;
+      s.connect(pv).connect(c.destination);
+    }
+    s.start();
+  }
+
+  setSfxVolume(v) { store.set('sfxVolume', v); if (this.g) this.g.sfx.gain.value = v; }
+
+  // ---------------------------------------------------------------- bağlantı
   async join(channelId) {
     if (this.joining || this.channelId === channelId) return;
     this.joining = true;
     try {
       if (this.channelId) this.leave();
-      this.ctx ||= new (window.AudioContext || window.webkitAudioContext)();
-      this.ctx.resume?.();
-      this.localStream = await this.getMic();
+      await this.ensureAudio();
+      this.buildGraph();
+      this.attachMic(await this.getMic());
       const res = await new Promise((r) => this.socket.emit('voice:join', {
-        channel_id: channelId, self_mute: this.muted || !this.localStream, self_deaf: this.deafened,
+        channel_id: channelId, self_mute: this.muted || !this.rawMic, self_deaf: this.deafened,
       }, r));
       if (!res?.ok) {
-        this.stopStream(this.localStream);
-        this.localStream = null;
+        this.teardownAudio();
         this.toast(res?.error || 'Ses kanalına bağlanılamadı', 'error');
         return;
       }
@@ -51,7 +270,6 @@ export class VoiceClient {
       this.canVideo = res.can_video;
       this.serverMuted = false;
       this.applyMute();
-      if (this.localStream) this.monitor(this.meId, this.localStream);
       for (const uid of res.peers) this.createPeer(uid);
       this.startLoop();
       playSound('join');
@@ -67,17 +285,16 @@ export class VoiceClient {
       return null;
     }
     const micId = store.get('micId', '');
-    const constraints = {
-      audio: {
-        deviceId: micId ? { ideal: micId } : undefined,
-        echoCancellation: store.get('echo', true),
-        noiseSuppression: store.get('noise', true),
-        autoGainControl: store.get('agc', true),
-      },
-    };
     try {
-      return await navigator.mediaDevices.getUserMedia(constraints);
-    } catch (e) {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: micId ? { ideal: micId } : undefined,
+          echoCancellation: store.get('echo', true),
+          noiseSuppression: store.get('noise', true),
+          autoGainControl: store.get('agc', true),
+        },
+      });
+    } catch {
       this.toast('Mikrofona erişilemedi — sadece dinleme modundasın', 'error');
       return null;
     }
@@ -90,24 +307,36 @@ export class VoiceClient {
     this.cleanup();
   }
 
+  teardownAudio() {
+    this.stopStream(this.rawMic);
+    this.rawMic = null;
+    if (this.g) {
+      for (const n of Object.values(this.g)) { try { n.disconnect?.(); } catch { /* yok */ } }
+      (this.g.fx || []).forEach((n) => { try { n.disconnect(); n.stop?.(); } catch { /* yok */ } });
+    }
+    this.g = null;
+    this.localStream = null;
+  }
+
   cleanup() {
     for (const uid of [...this.peers.keys()]) this.closePeer(uid);
-    this.stopStream(this.localStream);
+    this.teardownAudio();
     this.stopStream(this.videoStream);
-    this.localStream = this.videoStream = null;
+    this.videoStream = null;
     this.videoKind = null;
-    for (const a of this.analysers.values()) a.src.disconnect();
+    for (const a of this.analysers.values()) { try { a.src.disconnect(); } catch { /* yok */ } }
     this.analysers.clear();
     this.speaking.clear();
     clearInterval(this.timer);
     this.timer = null;
+    this.pttActive = false;
     this.channelId = this.serverId = null;
     this.onChange();
   }
 
   stopStream(s) { s?.getTracks().forEach((t) => t.stop()); }
 
-  // ---------- eşler
+  // ---------------------------------------------------------------- eşler
   createPeer(uid) {
     if (this.peers.has(uid)) return this.peers.get(uid);
     const pc = new RTCPeerConnection({ iceServers: this.iceServers });
@@ -159,7 +388,7 @@ export class VoiceClient {
     p.pc.close();
     if (p.audio) { p.audio.srcObject = null; p.audio.remove(); }
     const a = this.analysers.get(uid);
-    if (a) { a.src.disconnect(); this.analysers.delete(uid); }
+    if (a) { try { a.src.disconnect(); } catch { /* yok */ } this.analysers.delete(uid); }
     this.speaking.delete(uid);
     this.peers.delete(uid);
   }
@@ -184,7 +413,6 @@ export class VoiceClient {
     }
   }
 
-  // Sunucudan gelen ses durumu değişikliği
   onVoiceState(st) {
     if (st.user_id === this.meId) {
       if (this.channelId && st.channel_id !== this.channelId && st.prev_channel_id === this.channelId) this.cleanup();
@@ -204,12 +432,16 @@ export class VoiceClient {
     }
   }
 
-  // ---------- konuşma algılama
-  monitor(uid, stream) {
-    if (!this.ctx || !stream.getAudioTracks().length) return;
+  // ---------------------------------------------------------------- konuşma algılama
+  monitor(uid, stream, node) {
+    if (!this.ctx) return;
     const old = this.analysers.get(uid);
-    if (old) old.src.disconnect();
-    const src = this.ctx.createMediaStreamSource(stream);
+    if (old) { try { old.src.disconnect(old.an); } catch { /* yok */ } }
+    let src = node;
+    if (!src) {
+      if (!stream?.getAudioTracks().length) return;
+      src = this.ctx.createMediaStreamSource(stream);
+    }
     const an = this.ctx.createAnalyser();
     an.fftSize = 512;
     src.connect(an);
@@ -218,38 +450,43 @@ export class VoiceClient {
 
   startLoop() {
     clearInterval(this.timer);
-    const threshold = () => store.get('sensitivity', 0.035);
+    const interval = document.documentElement.dataset.lowend ? 200 : 80;
     this.timer = setInterval(() => {
-      const th = threshold();
+      const th = store.get('sensitivity', 0.035);
       for (const [uid, a] of this.analysers) {
         a.an.getByteTimeDomainData(a.buf);
         let sum = 0;
         for (const v of a.buf) { const x = (v - 128) / 128; sum += x * x; }
         const rms = Math.sqrt(sum / a.buf.length);
-        const silenced = uid === this.meId ? this.isMicOff() : false;
-        if (rms > th && !silenced) a.hold = 3; else if (a.hold > 0) a.hold--;
+        if (rms > th) a.hold = 3; else if (a.hold > 0) a.hold--;
         const now = a.hold > 0;
         if (now !== this.speaking.has(uid)) {
           now ? this.speaking.add(uid) : this.speaking.delete(uid);
           this.onSpeaking(uid, now);
         }
       }
-    }, 80);
+    }, interval);
   }
 
-  // ---------- kontroller
-  isMicOff() { return this.muted || this.deafened || this.serverMuted || !this.canSpeak || !this.localStream; }
+  // ---------------------------------------------------------------- kontroller
+  isMicOff() {
+    if (this.muted || this.deafened || this.serverMuted || !this.canSpeak || !this.rawMic) return true;
+    return this.mode !== 'vad' && !this.pttActive;
+  }
 
   applyMute() {
-    const off = this.isMicOff();
-    this.localStream?.getAudioTracks().forEach((t) => { t.enabled = !off; });
+    if (this.g) {
+      const t = this.ctx.currentTime;
+      this.g.gate.gain.setTargetAtTime(this.isMicOff() ? 0 : 1, t, 0.01);
+      this.g.out.gain.setTargetAtTime(this.serverMuted || !this.canSpeak ? 0 : 1, t, 0.01);
+    }
     for (const p of this.peers.values()) if (p.audio) p.audio.muted = this.deafened;
     if (this.channelId) this.sendState();
   }
 
   sendState() {
     this.socket.emit('voice:update', {
-      self_mute: this.muted || !this.localStream || !this.canSpeak,
+      self_mute: this.muted || !this.rawMic || !this.canSpeak,
       self_deaf: this.deafened,
       self_video: this.videoKind === 'camera',
       self_stream: this.videoKind === 'screen',
@@ -333,19 +570,13 @@ export class VoiceClient {
     return this.peers.get(uid)?.videoStream || null;
   }
 
+  // Mikrofon değişince yalnızca kaynak düğümü değişir; giden ses izi aynı kalır
   async switchMic() {
-    if (!this.channelId) return;
+    if (!this.channelId || !this.g) return;
     const s = await this.getMic();
     if (!s) return;
-    const track = s.getAudioTracks()[0];
-    for (const p of this.peers.values()) {
-      const sender = p.pc.getSenders().find((x) => x.track?.kind === 'audio');
-      if (sender) sender.replaceTrack(track).catch(() => {});
-      else p.pc.addTrack(track, s);
-    }
-    this.stopStream(this.localStream);
-    this.localStream = s;
-    this.monitor(this.meId, s);
+    this.stopStream(this.rawMic);
+    this.attachMic(s);
     this.applyMute();
   }
 }

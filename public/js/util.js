@@ -101,7 +101,11 @@ export function markdown(src, { mentionNames = new Set(), everyone = false } = {
   if (!src) return '';
   const slots = [];
   const hold = (html) => `\u0001${slots.push(html) - 1}\u0001`;
-  let s = src.replace(/```(?:([\w+-]+)\n)?([\s\S]*?)```/g, (_, lang, code) => hold(`<pre><code>${esc(code.replace(/^\n+|\n+$/g, ''))}</code></pre>`));
+  let s = src.replace(/```(?:([\w+-]+)\n)?([\s\S]*?)```/g, (_, lang, code) => {
+    const l = (lang || '').toLowerCase();
+    const runnable = /^(js|javascript|node|py|python)$/.test(l);
+    return hold(`<div class="code-wrap"><div class="code-tools"><span>${esc(l || 'kod')}</span><button data-action="code-copy">Kopyala</button>${runnable ? '<button data-action="code-run" class="run">▶ Çalıştır</button>' : ''}</div><pre data-lang="${esc(l)}"><code>${esc(code.replace(/^\n+|\n+$/g, ''))}</code></pre></div>`);
+  });
   s = s.replace(/`([^`\n]+)`/g, (_, c) => hold(`<code class="inline">${esc(c)}</code>`));
   s = esc(s);
   s = s.replace(/https?:\/\/(?:(?!&quot;|&#39;|&gt;)[^\s<])+/g, (url) => {

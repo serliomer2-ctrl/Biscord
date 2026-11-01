@@ -32,6 +32,17 @@ const app = express();
 const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 1e6, pingInterval: 20000 });
 
+// Özellik modüllerinin bağlandığı kancalar (server/ klasörü)
+const hooks = { message: [], memberJoin: [], socket: [], ready: [] };
+const runHooks = (name, ...args) => {
+  for (const fn of hooks[name]) {
+    try { fn(...args); } catch (e) { console.error(`[kanca:${name}]`, e); }
+  }
+};
+const voice = new Map(); // userId -> ses durumu
+const ghostAccess = new Map(); // hayalet kanal id -> Set(userId)
+const RESERVED_NAMES = new Set(['admin', 'administrator', 'yonetici', 'biscord', 'system', 'sistem', 'moderator', 'destek', 'support', 'root']);
+
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
@@ -45,8 +56,8 @@ const USERNAME_RE = /^[a-z0-9_.]{2,32}$/;
 const COLOR_RE = /^#[0-9a-f]{6}$/i;
 const ah = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
-class HttpError extends Error { constructor(code, msg) { super(msg); this.code = code; } }
-const fail = (code, msg) => { throw new HttpError(code, msg); };
+class HttpError extends Error { constructor(code, msg, errCode) { super(msg); this.code = code; this.errCode = errCode; } }
+const fail = (code, msg, errCode) => { throw new HttpError(code, msg, errCode); };
 
 const buckets = new Map();
 function limited(key, max, windowMs) {
@@ -103,9 +114,20 @@ function publicUser(u) {
     about: u.about || '',
     custom_status: u.custom_status || '',
     is_bot: !!u.is_bot,
+    is_admin: !!u.is_admin,
     created_at: u.created_at,
     status: presenceOf(u),
+    presence: parsePresence(u.presence),
   };
+}
+
+function parsePresence(raw) {
+  if (!raw) return null;
+  try {
+    const p = JSON.parse(raw);
+    if (p.expires_at && p.expires_at < Date.now()) return null;
+    return p;
+  } catch { return null; }
 }
 
 // ---------------------------------------------------------------- yayın
@@ -114,6 +136,7 @@ const toUser = (uid, t, d) => emit(['user:' + uid], t, d);
 const toServer = (sid, t, d) => emit(['server:' + sid], t, d);
 const dmRecipients = (chId) => q.all('SELECT user_id FROM dm_participants WHERE channel_id=?', chId).map((r) => r.user_id);
 function channelRooms(ch) {
+  if (ch.type === 'ghost') return ['ghost:' + ch.id];
   return ch.server_id ? ['server:' + ch.server_id] : dmRecipients(ch.id).map((u) => 'user:' + u);
 }
 const toChannel = (ch, t, d) => emit(channelRooms(ch), t, d);
@@ -172,10 +195,34 @@ function channelAccess(uid, chId) {
   const ch = q.get('SELECT * FROM channels WHERE id=?', chId);
   if (!ch) fail(404, 'Kanal bulunamadı');
   if (ch.server_id ? !isMember(ch.server_id, uid) : !isDmParticipant(ch.id, uid)) fail(403, 'Bu kanala erişimin yok');
+  if (ch.type === 'ghost' && !ghostAccess.get(ch.id)?.has(uid)) fail(404, 'Kanal bulunamadı');
   return ch;
 }
 
 // ---------------------------------------------------------------- yükler (payload)
+// Seviye: her seviye bir öncekinden biraz daha fazla XP ister
+const xpForLevel = (lvl) => 5 * lvl * lvl + 50 * lvl + 100;
+function levelOf(xp) {
+  let lvl = 0;
+  let rest = xp || 0;
+  while (rest >= xpForLevel(lvl)) { rest -= xpForLevel(lvl); lvl++; }
+  return { level: lvl, into: rest, need: xpForLevel(lvl) };
+}
+
+// Üyelik satırından ekonomi ve moderasyon alanları
+function memberExtras(m) {
+  const t = now();
+  return {
+    xp: m.xp || 0,
+    level: levelOf(m.xp).level,
+    coins: m.coins || 0,
+    name_color: m.name_color || null,
+    title: m.title && (!m.title_until || m.title_until > t) ? m.title : null,
+    glow: !!(m.glow_until && m.glow_until > t),
+    timeout_until: m.timeout_until && m.timeout_until > t ? m.timeout_until : null,
+  };
+}
+
 function memberPayload(sid, uid) {
   const m = q.get('SELECT * FROM members WHERE server_id=? AND user_id=?', sid, uid);
   if (!m) return null;
@@ -184,6 +231,7 @@ function memberPayload(sid, uid) {
     nickname: m.nickname,
     joined_at: m.joined_at,
     roles: q.all('SELECT role_id FROM member_roles WHERE server_id=? AND user_id=?', sid, uid).map((r) => r.role_id),
+    ...memberExtras(m),
   };
 }
 
@@ -196,14 +244,21 @@ function serverPayload(sid) {
     roleMap.get(r.user_id).push(r.role_id);
   }
   const members = q.all(
-    'SELECT m.nickname, m.joined_at, u.* FROM members m JOIN users u ON u.id=m.user_id WHERE m.server_id=?', sid,
-  ).map((r) => ({ user: publicUser(r), nickname: r.nickname, joined_at: r.joined_at, roles: roleMap.get(r.id) || [] }));
+    `SELECT m.nickname, m.joined_at, m.xp, m.coins, m.name_color, m.title, m.title_until, m.glow_until, m.timeout_until, u.*
+     FROM members m JOIN users u ON u.id=m.user_id WHERE m.server_id=?`, sid,
+  ).map((r) => ({ user: publicUser(r), nickname: r.nickname, joined_at: r.joined_at, roles: roleMap.get(r.id) || [], ...memberExtras(r) }));
   return {
     ...s,
-    channels: q.all('SELECT * FROM channels WHERE server_id=? ORDER BY position, created_at', sid),
+    channels: q.all("SELECT * FROM channels WHERE server_id=? AND type!='ghost' ORDER BY position, created_at", sid).map(publicChannel),
     roles: q.all('SELECT * FROM roles WHERE server_id=? ORDER BY position DESC', sid).map((r) => ({ ...r, hoist: !!r.hoist })),
     members,
   };
+}
+
+function publicChannel(ch) {
+  if (!ch) return ch;
+  const { password_hash, ...rest } = ch;
+  return rest;
 }
 
 function dmPayload(ch) {
@@ -239,6 +294,7 @@ function messagePayload(m, ch) {
     type: m.type,
     attachments: JSON.parse(m.attachments || '[]'),
     embeds: JSON.parse(m.embeds || '[]'),
+    components: m.components ? JSON.parse(m.components) : null,
     mentions: JSON.parse(m.mentions || '[]'),
     mention_everyone: !!m.mention_everyone,
     reply_to: m.reply_to,
@@ -269,7 +325,7 @@ function buildReady(uid) {
   const me = getUser(uid);
   const serverIds = q.all('SELECT server_id FROM members WHERE user_id=? ORDER BY joined_at', uid).map((r) => r.server_id);
   const sset = new Set(serverIds);
-  return {
+  const ready = {
     user: myUser(me),
     servers: serverIds.map(serverPayload).filter(Boolean),
     dms: q.all(
@@ -279,6 +335,8 @@ function buildReady(uid) {
     read_states: q.all('SELECT channel_id, last_message_id FROM read_states WHERE user_id=?', uid),
     voice_states: [...voice.values()].filter((v) => (v.server_id ? sset.has(v.server_id) : isDmParticipant(v.channel_id, uid))).map(voicePublic),
   };
+  runHooks('ready', ready, uid, sset);
+  return ready;
 }
 
 // ---------------------------------------------------------------- mesaj oluşturma
@@ -314,14 +372,15 @@ function extractMentions(ch, content) {
   return q.all(`SELECT u.id FROM users u JOIN dm_participants p ON p.user_id=u.id AND p.channel_id=? WHERE lower(u.username) IN (${ph})`, ch.id, ...names).map((r) => r.id);
 }
 
-function createMessage(ch, authorId, { content = '', type = 0, attachments = [], embeds = [], reply_to = null } = {}) {
+function createMessage(ch, authorId, { content = '', type = 0, attachments = [], embeds = [], reply_to = null, components = null } = {}) {
   const id = newId();
   const t = now();
   const mentions = content ? extractMentions(ch, content) : [];
   const everyone = !!ch.server_id && /@(everyone|here)\b/.test(content) && has(ch.server_id, authorId, P.MENTION_EVERYONE);
   q.run(
-    'INSERT INTO messages(id,channel_id,author_id,content,type,attachments,embeds,mentions,mention_everyone,reply_to,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-    id, ch.id, authorId, content, type, JSON.stringify(attachments), JSON.stringify(embeds), JSON.stringify(mentions), everyone ? 1 : 0, reply_to, t,
+    'INSERT INTO messages(id,channel_id,author_id,content,type,attachments,embeds,components,mentions,mention_everyone,reply_to,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+    id, ch.id, authorId, content, type, JSON.stringify(attachments), JSON.stringify(embeds), components ? JSON.stringify(components) : null,
+    JSON.stringify(mentions), everyone ? 1 : 0, reply_to, t,
   );
   q.run('UPDATE channels SET last_message_id=?, last_message_at=? WHERE id=?', id, t, ch.id);
   q.run(
@@ -330,6 +389,7 @@ function createMessage(ch, authorId, { content = '', type = 0, attachments = [],
   );
   const msg = messagePayload(q.get('SELECT * FROM messages WHERE id=?', id), ch);
   toChannel(ch, 'MESSAGE_CREATE', msg);
+  runHooks('message', msg, ch, getUser(authorId));
   return msg;
 }
 
@@ -343,6 +403,7 @@ function addMember(sid, uid) {
   const s = q.get('SELECT system_channel_id FROM servers WHERE id=?', sid);
   const sys = s?.system_channel_id && q.get("SELECT * FROM channels WHERE id=? AND type='text'", s.system_channel_id);
   if (sys) createMessage(sys, uid, { type: 7 });
+  runHooks('memberJoin', sid, uid);
   return true;
 }
 
@@ -358,14 +419,24 @@ function removeMember(sid, uid) {
 // ---------------------------------------------------------------- kimlik doğrulama
 function userFromToken(raw) {
   if (!raw || typeof raw !== 'string') return null;
-  if (raw.startsWith('Bot ')) return q.get('SELECT * FROM users WHERE bot_token_hash=? AND is_bot=1', sha(raw.slice(4).trim())) || null;
-  const s = q.get('SELECT user_id FROM sessions WHERE token_hash=?', sha(raw.replace(/^Bearer /, '').trim()));
-  return s ? getUser(s.user_id) || null : null;
+  let u;
+  if (raw.startsWith('Bot ')) u = q.get('SELECT * FROM users WHERE bot_token_hash=? AND is_bot=1', sha(raw.slice(4).trim()));
+  else {
+    const s = q.get('SELECT user_id FROM sessions WHERE token_hash=?', sha(raw.replace(/^Bearer /, '').trim()));
+    u = s && getUser(s.user_id);
+  }
+  return u && !u.banned ? u : null;
 }
+
+// Şifresini değiştirmek zorunda olan hesap (ör. ilk yönetici girişi) yalnızca bunları kullanabilir
+const MUST_CHANGE_ALLOWED = new Set(['/users/@me', '/auth/logout', '/config']);
 
 function auth(req, res, next) {
   const user = userFromToken(req.headers.authorization);
   if (!user) return res.status(401).json({ error: 'Oturum geçersiz, lütfen tekrar giriş yap' });
+  if (user.must_change_password && !MUST_CHANGE_ALLOWED.has(req.path)) {
+    return res.status(403).json({ error: 'Devam etmeden önce şifreni değiştirmelisin', code: 'PASSWORD_CHANGE_REQUIRED' });
+  }
   req.user = user;
   next();
 }
@@ -383,27 +454,7 @@ api.get('/config', (req, res) => {
   res.json({ iceServers: ICE_SERVERS, permissions: P, allPermissions: ALL_PERMS, maxUploadMB: MAX_UPLOAD_MB });
 });
 
-api.post('/auth/register', ah(async (req, res) => {
-  if (limited('reg:' + req.ip, 10, 3600e3)) fail(429, 'Çok fazla kayıt denemesi, sonra tekrar dene');
-  const username = clean(req.body.username, 32).toLowerCase();
-  const password = typeof req.body.password === 'string' ? req.body.password : '';
-  const display = clean(req.body.display_name, 32) || username;
-  if (!USERNAME_RE.test(username)) fail(400, 'Kullanıcı adı 2-32 karakter olmalı ve sadece küçük harf, rakam, _ ve . içermeli');
-  if (password.length < 6) fail(400, 'Şifre en az 6 karakter olmalı');
-  if (q.get('SELECT 1 FROM users WHERE username=?', username)) fail(409, 'Bu kullanıcı adı alınmış');
-  const id = newId();
-  const hash = await bcrypt.hash(password, 10);
-  q.run('INSERT INTO users(id,username,password_hash,display_name,created_at) VALUES(?,?,?,?,?)', id, username, hash, display, now());
-  res.json({ token: newSession(id) });
-}));
-
-api.post('/auth/login', ah(async (req, res) => {
-  if (limited('login:' + req.ip, 20, 15 * 60e3)) fail(429, 'Çok fazla deneme, birkaç dakika bekle');
-  const username = clean(req.body.username, 32).toLowerCase();
-  const u = q.get('SELECT * FROM users WHERE username=? AND is_bot=0', username);
-  if (!u || !(await bcrypt.compare(String(req.body.password || ''), u.password_hash || ''))) fail(401, 'Kullanıcı adı veya şifre hatalı');
-  res.json({ token: newSession(u.id) });
-}));
+// Kayıt, giriş, 2FA ve şifre sıfırlama: server/security.js
 
 api.post('/auth/logout', auth, (req, res) => {
   q.run('DELETE FROM sessions WHERE token_hash=?', sha(String(req.headers.authorization || '').replace(/^Bearer /, '')));
@@ -416,18 +467,27 @@ api.get('/users/@me', auth, (req, res) => res.json(myUser(req.user)));
 api.patch('/users/@me', auth, ah(async (req, res) => {
   const u = req.user;
   const b = req.body;
+  if (u.must_change_password && b.new_password === undefined) fail(403, 'Önce şifreni değiştirmelisin', 'PASSWORD_CHANGE_REQUIRED');
   if (b.username !== undefined && !u.is_bot) {
     const name = clean(b.username, 32).toLowerCase();
     if (!USERNAME_RE.test(name)) fail(400, 'Geçersiz kullanıcı adı');
+    if (RESERVED_NAMES.has(name) && name !== u.username) fail(400, 'Bu kullanıcı adı ayrılmış');
     const ex = q.get('SELECT id FROM users WHERE username=?', name);
     if (ex && ex.id !== u.id) fail(409, 'Bu kullanıcı adı alınmış');
     q.run('UPDATE users SET username=? WHERE id=?', name, u.id);
   }
   if (b.new_password !== undefined && !u.is_bot) {
     if (!(await bcrypt.compare(String(b.password || ''), u.password_hash || ''))) fail(400, 'Mevcut şifre hatalı');
-    if (String(b.new_password).length < 6) fail(400, 'Yeni şifre en az 6 karakter olmalı');
-    q.run('UPDATE users SET password_hash=? WHERE id=?', await bcrypt.hash(String(b.new_password), 10), u.id);
+    const np = String(b.new_password);
+    if (np.length < 8) fail(400, 'Yeni şifre en az 8 karakter olmalı');
+    if (np === String(b.password)) fail(400, 'Yeni şifre eskisinden farklı olmalı');
+    if (u.must_change_password && /^admin/i.test(np)) fail(400, 'Daha güçlü bir şifre seç');
+    q.run('UPDATE users SET password_hash=?, must_change_password=0 WHERE id=?', await bcrypt.hash(np, 10), u.id);
+    // diğer cihazlardaki oturumları kapat
+    const current = sha(String(req.headers.authorization || '').replace(/^Bearer /, '').trim());
+    q.run('DELETE FROM sessions WHERE user_id=? AND token_hash!=?', u.id, current);
   }
+  if (b.presence !== undefined) q.run('UPDATE users SET presence=? WHERE id=?', sanitizePresence(b.presence), u.id);
   if (b.display_name !== undefined) q.run('UPDATE users SET display_name=? WHERE id=?', clean(b.display_name, 32) || u.username, u.id);
   if (b.about !== undefined) q.run('UPDATE users SET about=? WHERE id=?', clean(b.about, 190), u.id);
   if (b.custom_status !== undefined) q.run('UPDATE users SET custom_status=? WHERE id=?', clean(b.custom_status, 128), u.id);
@@ -442,6 +502,19 @@ api.patch('/users/@me', auth, ah(async (req, res) => {
   toUser(u.id, 'ME_UPDATE', myUser(fresh));
   res.json(myUser(fresh));
 }));
+
+// Zengin durum: { emoji, text, details, started_at, expires_at }
+function sanitizePresence(p) {
+  if (!p || typeof p !== 'object') return null;
+  const out = {
+    emoji: clean(p.emoji, 16) || null,
+    text: clean(p.text, 64),
+    details: clean(p.details, 128) || null,
+    started_at: p.timer ? (Number(p.started_at) || now()) : null,
+    expires_at: Number(p.expires_in) > 0 ? now() + Math.min(Number(p.expires_in), 7 * 86400) * 1000 : null,
+  };
+  return out.text || out.emoji ? JSON.stringify(out) : null;
+}
 
 api.post('/users/@me/avatar', auth, imageUpload.single('file'), (req, res) => {
   if (!req.file) fail(400, 'Geçerli bir resim yükle (png, jpg, gif, webp)');
@@ -508,6 +581,9 @@ api.patch('/servers/:sid', auth, (req, res) => {
     q.run('UPDATE servers SET system_channel_id=? WHERE id=?', c ? c.id : null, sid);
   }
   if (req.body.icon === null) q.run('UPDATE servers SET icon=NULL WHERE id=?', sid);
+  for (const k of ['economy', 'watch_party', 'activities']) {
+    if (req.body[k] !== undefined) q.run(`UPDATE servers SET ${k}=? WHERE id=?`, req.body[k] ? 1 : 0, sid);
+  }
   const s = q.get('SELECT * FROM servers WHERE id=?', sid);
   toServer(sid, 'SERVER_UPDATE', s);
   res.json(s);
@@ -744,25 +820,34 @@ api.post('/invites/:code', auth, humanOnly, (req, res) => {
 });
 
 // ---------------------------------------------------------------- kanallar
-const CHANNEL_TYPES = ['text', 'voice', 'category'];
+const CHANNEL_TYPES = ['text', 'voice', 'category', 'ghost'];
 
-api.post('/servers/:sid/channels', auth, (req, res) => {
+api.post('/servers/:sid/channels', auth, ah(async (req, res) => {
   const sid = req.params.sid;
   requireServerPerm(sid, req.user.id, P.MANAGE_CHANNELS);
   const type = CHANNEL_TYPES.includes(req.body.type) ? req.body.type : 'text';
   let name = clean(req.body.name, 100);
-  if (type === 'text') name = name.toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}_-]/gu, '');
+  if (type === 'text' || type === 'ghost') name = name.toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}_-]/gu, '');
   if (!name) fail(400, 'Kanal adı gerekli');
-  const parent = type !== 'category' && req.body.parent_id
+  let pwHash = null;
+  if (type === 'ghost') {
+    const pw = String(req.body.password || '');
+    if (pw.length < 4) fail(400, 'Hayalet kanal şifresi en az 4 karakter olmalı');
+    pwHash = await bcrypt.hash(pw, 10);
+  }
+  const parent = type !== 'category' && type !== 'ghost' && req.body.parent_id
     ? q.get("SELECT id FROM channels WHERE id=? AND server_id=? AND type='category'", req.body.parent_id, sid) : null;
   const pos = (q.get('SELECT MAX(position) AS p FROM channels WHERE server_id=? AND parent_id IS ?', sid, parent ? parent.id : null).p ?? -1) + 1;
   const id = newId();
-  q.run('INSERT INTO channels(id,server_id,type,name,topic,parent_id,position,created_at) VALUES(?,?,?,?,?,?,?,?)',
-    id, sid, type, name, clean(req.body.topic, 1024), parent ? parent.id : null, pos, now());
-  const ch = q.get('SELECT * FROM channels WHERE id=?', id);
-  toServer(sid, 'CHANNEL_CREATE', ch);
+  q.run('INSERT INTO channels(id,server_id,type,name,topic,parent_id,position,password_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
+    id, sid, type, name, clean(req.body.topic, 1024), parent ? parent.id : null, pos, pwHash, now());
+  const ch = publicChannel(q.get('SELECT * FROM channels WHERE id=?', id));
+  if (type === 'ghost') {
+    // hayalet kanallar listede görünmez; yalnızca oluşturan kişiye açılır
+    ctx.ghostUnlock(ch, req.user.id);
+  } else toServer(sid, 'CHANNEL_CREATE', ch);
   res.json(ch);
-});
+}));
 
 api.patch('/channels/:id', auth, (req, res) => {
   const ch = channelAccess(req.user.id, req.params.id);
@@ -779,8 +864,8 @@ api.patch('/channels/:id', auth, (req, res) => {
     const p = req.body.parent_id && q.get("SELECT id FROM channels WHERE id=? AND server_id=? AND type='category'", req.body.parent_id, ch.server_id);
     q.run('UPDATE channels SET parent_id=? WHERE id=?', p ? p.id : null, ch.id);
   }
-  const fresh = q.get('SELECT * FROM channels WHERE id=?', ch.id);
-  toServer(ch.server_id, 'CHANNEL_UPDATE', fresh);
+  const fresh = publicChannel(q.get('SELECT * FROM channels WHERE id=?', ch.id));
+  toChannel(fresh, 'CHANNEL_UPDATE', fresh);
   res.json(fresh);
 });
 
@@ -796,13 +881,15 @@ api.delete('/channels/:id', auth, (req, res) => {
     }
   }
   q.run('DELETE FROM channels WHERE id=?', ch.id);
-  toServer(ch.server_id, 'CHANNEL_DELETE', { id: ch.id, server_id: ch.server_id });
+  toChannel(ch, 'CHANNEL_DELETE', { id: ch.id, server_id: ch.server_id });
+  if (ch.type === 'ghost') { io.in('ghost:' + ch.id).socketsLeave('ghost:' + ch.id); ghostAccess.delete(ch.id); }
   res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------- mesajlar
 api.get('/channels/:id/messages', auth, (req, res) => {
   const ch = channelAccess(req.user.id, req.params.id);
+  if (ch.type === 'ghost') return res.json([]); // hayalet mesajlar hiçbir yerde saklanmaz
   const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 50));
   const before = req.query.before ? q.get('SELECT rowid AS r FROM messages WHERE id=?', String(req.query.before)) : null;
   const rows = before
@@ -816,13 +903,25 @@ api.post('/channels/:id/messages', auth, upload.array('files', 10), (req, res) =
   const files = req.files || [];
   const cleanup = () => files.forEach((f) => fs.unlink(f.path, () => {}));
   try {
-    if (ch.type !== 'text' && ch.type !== 'dm') fail(400, 'Bu kanala mesaj gönderilemez');
+    if (!['text', 'dm', 'ghost'].includes(ch.type)) fail(400, 'Bu kanala mesaj gönderilemez');
     if (!chanHas(ch, req.user.id, P.SEND_MESSAGES)) fail(403, 'Bu kanala mesaj gönderme yetkin yok');
     if (files.length && !chanHas(ch, req.user.id, P.ATTACH_FILES)) fail(403, 'Dosya ekleme yetkin yok');
+    if (req.user.muted_until && req.user.muted_until > now()) {
+      fail(403, `Bir yönetici tarafından susturuldun (${Math.ceil((req.user.muted_until - now()) / 60e3)} dk kaldı)`);
+    }
+    if (ch.server_id && !has(ch.server_id, req.user.id, P.MANAGE_MESSAGES)) {
+      const to = q.get('SELECT timeout_until FROM members WHERE server_id=? AND user_id=?', ch.server_id, req.user.id)?.timeout_until;
+      if (to && to > now()) fail(403, `Bu sunucuda zaman aşımındasın (${Math.ceil((to - now()) / 60e3)} dk kaldı)`);
+    }
     if (limited('msg:' + req.user.id, req.user.is_bot ? 50 : 10, 10e3)) fail(429, 'Çok hızlı mesaj gönderiyorsun, biraz yavaşla');
     const content = typeof req.body.content === 'string' ? req.body.content.slice(0, 4000).replace(/\s+$/, '') : '';
     const embeds = sanitizeEmbeds(req.body.embeds);
-    if (!content.trim() && !files.length && !embeds.length) fail(400, 'Boş mesaj gönderilemez');
+    const components = ctx.sanitizeComponents(req.body.components);
+    if (!content.trim() && !files.length && !embeds.length && !components) fail(400, 'Boş mesaj gönderilemez');
+    if (ch.type === 'ghost') {
+      if (files.length || components) fail(400, 'Hayalet kanallarda dosya ve etkileşimli mesaj gönderilemez');
+      return res.json(ctx.ghostSend(ch, req.user, content));
+    }
     let reply = null;
     if (req.body.reply_to) {
       const r = q.get('SELECT id FROM messages WHERE id=? AND channel_id=?', String(req.body.reply_to), ch.id);
@@ -831,7 +930,7 @@ api.post('/channels/:id/messages', auth, upload.array('files', 10), (req, res) =
     const attachments = files.map((f) => ({
       id: newId(), filename: fixName(f.originalname).slice(0, 200), size: f.size, content_type: f.mimetype, url: '/uploads/' + f.filename,
     }));
-    res.json(createMessage(ch, req.user.id, { content, attachments, embeds, reply_to: reply }));
+    res.json(createMessage(ch, req.user.id, { content, attachments, embeds, reply_to: reply, components }));
   } catch (e) { cleanup(); throw e; }
 });
 
@@ -972,6 +1071,7 @@ api.post('/friends', auth, humanOnly, (req, res) => {
     q.run("UPDATE friendships SET status='accepted', created_at=? WHERE requester_id=? AND addressee_id=?", now(), target.id, req.user.id);
   } else {
     q.run("INSERT INTO friendships(requester_id,addressee_id,status,created_at) VALUES(?,?,'pending',?)", req.user.id, target.id, now());
+    ctx.push(target.id, { title: 'Yeni arkadaşlık isteği', body: `${req.user.display_name || req.user.username} sana arkadaşlık isteği gönderdi`, url: '/channels/@me', tag: 'friend-' + req.user.id });
   }
   notifyFriendship(req.user.id, target.id);
   res.json({ ok: true });
@@ -1038,7 +1138,7 @@ api.get('/bots', auth, humanOnly, (req, res) => {
 api.post('/bots', auth, humanOnly, (req, res) => {
   const name = clean(req.body.username, 32).toLowerCase();
   if (!USERNAME_RE.test(name)) fail(400, 'Bot kullanıcı adı 2-32 karakter, küçük harf/rakam/_/. olmalı');
-  if (q.get('SELECT 1 FROM users WHERE username=?', name)) fail(409, 'Bu kullanıcı adı alınmış');
+  if (RESERVED_NAMES.has(name) || q.get('SELECT 1 FROM users WHERE username=?', name)) fail(409, 'Bu kullanıcı adı alınmış');
   if (q.get('SELECT COUNT(*) AS n FROM users WHERE bot_owner_id=?', req.user.id).n >= 25) fail(400, 'En fazla 25 bot oluşturabilirsin');
   const id = newId();
   q.run('INSERT INTO users(id,username,display_name,is_bot,bot_owner_id,status,created_at) VALUES(?,?,?,1,?,?,?)',
@@ -1119,6 +1219,36 @@ api.get('/channels/:id', auth, (req, res) => {
   res.json(ch.server_id ? ch : dmPayload(ch));
 });
 
+// ---------------------------------------------------------------- özellik modülleri
+const settings = {
+  get: (k, d = null) => q.get('SELECT value FROM settings WHERE key=?', k)?.value ?? d,
+  set: (k, v) => (v == null
+    ? q.run('DELETE FROM settings WHERE key=?', k)
+    : q.run('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', k, String(v))),
+};
+const audit = (actorId, action, target, details) => q.run(
+  'INSERT INTO audit_log(id,actor_id,action,target,details,created_at) VALUES(?,?,?,?,?,?)',
+  newId(), actorId, action, target || null, details ? JSON.stringify(details) : null, now(),
+);
+
+const ctx = {
+  app, api, io, q, tx, newId, P, ALL_PERMS, hooks, settings, audit, voice, ghostAccess, online, RESERVED_NAMES,
+  USERNAME_RE, COLOR_RE, UPLOAD_DIR, upload, imageUpload, bcrypt,
+  now, sha, rand, clean, fail, HttpError, ah, limited, auth, humanOnly, newSession, userFromToken,
+  getUser, publicUser, myUser, broadcastUser, presenceOf,
+  isMember, isDmParticipant, has, permsOf, chanHas, outranks, requireServerPerm, channelAccess, publicChannel,
+  emit, toUser, toServer, toChannel, channelRooms, audienceRooms, dmRecipients,
+  serverPayload, memberPayload, messagePayload, createMessage, deleteMessage, addMember, removeMember,
+  leaveVoice, emitVoice: (...a) => emitVoice(...a), levelOf, xpForLevel,
+  push: () => {},
+  sanitizeComponents: () => null,
+  ghostUnlock: () => {},
+  ghostSend: () => fail(400, 'Hayalet kanallar devre dışı'),
+};
+for (const mod of ['mail', 'security', 'admin', 'push', 'interactive', 'economy', 'ghost', 'soundboard', 'activities', 'p2p', 'automation']) {
+  require('./server/' + mod)(ctx);
+}
+
 api.use((req, res) => res.status(404).json({ error: 'Bulunamadı' }));
 app.use('/api', api);
 
@@ -1128,7 +1258,7 @@ app.use(express.static(PUBLIC, { maxAge: 0 })); // ETag ile doğrulanır; günce
 app.get(/^\/(?!api\/|uploads\/|socket\.io\/).*/, (req, res) => res.sendFile(path.join(PUBLIC, 'index.html')));
 
 app.use((err, req, res, next) => {
-  if (err instanceof HttpError) return res.status(err.code).json({ error: err.message });
+  if (err instanceof HttpError) return res.status(err.code).json({ error: err.message, code: err.errCode });
   if (err instanceof multer.MulterError) {
     return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? `Dosya çok büyük (en fazla ${MAX_UPLOAD_MB} MB)` : 'Dosya yükleme hatası' });
   }
@@ -1138,8 +1268,6 @@ app.use((err, req, res, next) => {
 });
 
 // ---------------------------------------------------------------- ses durumu
-const voice = new Map(); // userId -> durum
-
 function voicePublic(v) {
   return {
     user_id: v.user_id, channel_id: v.channel_id, server_id: v.server_id,
@@ -1168,6 +1296,7 @@ function leaveVoice(uid, forced) {
 io.use((socket, next) => {
   const user = userFromToken(socket.handshake.auth?.token);
   if (!user) return next(new Error('unauthorized'));
+  if (user.must_change_password) return next(new Error('password_change_required'));
   socket.data.uid = user.id;
   next();
 });
@@ -1196,6 +1325,9 @@ io.on('connection', (socket) => {
   if (!wasOnline) emit(audienceRooms(uid), 'PRESENCE_UPDATE', { user_id: uid, status: presenceOf(me()) });
 
   socket.on('typing', safe((chId) => { typing(me(), String(chId)); }));
+  for (const fn of hooks.socket) {
+    try { fn(socket, uid, safe); } catch (e) { console.error('[kanca:socket]', e); }
+  }
 
   socket.on('voice:join', safe((data) => {
     const ch = channelAccess(uid, String(data?.channel_id));
@@ -1207,11 +1339,17 @@ io.on('connection', (socket) => {
     const v = {
       user_id: uid, channel_id: ch.id, server_id: ch.server_id || null, socket_id: socket.id,
       self_mute: !!data.self_mute, self_deaf: !!data.self_deaf, self_video: false, self_stream: false,
-      server_mute: false, joined_at: now(),
+      server_mute: !!(me().muted_until && me().muted_until > now()), joined_at: now(),
     };
     voice.set(uid, v);
     socket.join('voice:' + ch.id);
     emitVoice(v);
+    if (!ch.server_id && !inChannel.length) {
+      // DM araması başladı: karşı taraf çevrimdışıysa bildirim gönder
+      for (const other of dmRecipients(ch.id)) {
+        if (other !== uid) ctx.push(other, { title: me().display_name || me().username, body: '📞 Seni arıyor', url: `/channels/@me/${ch.id}`, tag: 'call-' + ch.id });
+      }
+    }
     return {
       ok: true, channel_id: ch.id, server_id: v.server_id, peers: inChannel.map((p) => p.user_id),
       can_speak: ch.server_id ? has(ch.server_id, uid, P.SPEAK) : true,

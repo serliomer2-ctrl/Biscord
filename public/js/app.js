@@ -6,6 +6,21 @@ import {
 } from './util.js';
 import { VoiceClient } from './voice.js';
 import { EMOJI_CATEGORIES, QUICK_REACTIONS } from './emoji.js';
+import { ctx } from './ctx.js';
+import * as security from './f/security.js';
+import { openAdminPanel } from './f/admin.js';
+import * as pwa from './f/pwa.js';
+import { applyTheme, appearancePage } from './f/theme.js';
+import { presenceLine, presenceCard, presenceEditor } from './f/presence.js';
+import { componentHTML, interact, pollModal, todoModal } from './f/interactive.js';
+import { shopModal, claimDaily } from './f/economy.js';
+import { soundboardPanel, invalidateSounds, keyName } from './f/soundboard.js';
+import * as acts from './f/activities.js';
+import { highlightIn, runBlock, sandboxModal } from './f/coderun.js';
+import * as files from './f/files.js';
+import * as clips from './f/clips.js';
+import { automationPage } from './f/automation.js';
+import { VOICE_FILTERS } from './voice.js';
 
 const root = $('#root');
 const layers = $('#layers');
@@ -39,6 +54,9 @@ const S = {
   focusTile: null,
   ready: false,
   stick: true,
+  activities: new Map(),   // kanal id -> etkinlik özeti
+  ghostPresence: new Map(), // hayalet kanal id -> içerideki kullanıcılar
+  announcement: null,
 };
 
 const ss = {
@@ -72,7 +90,14 @@ function memberRoles(sid, uid) {
   if (!m) return [];
   return m.roles.map((r) => s.roles.get(r)).filter(Boolean).sort((a, b) => b.position - a.position);
 }
-const nameColor = (uid, sid) => (sid ? memberRoles(sid, uid).find((r) => r.color)?.color || '' : '');
+const nameColor = (uid, sid) => (sid ? member(sid, uid)?.name_color || memberRoles(sid, uid).find((r) => r.color)?.color || '' : '');
+// Mağazadan alınan unvan ve parıltı
+function nameExtras(uid, sid) {
+  const m = sid && member(sid, uid);
+  const u = user(uid);
+  return `${m?.title ? `<span class="title-chip">${esc(m.title)}</span>` : ''}${u?.is_admin ? '<span class="admin-tag" title="Biscord Yöneticisi">🛡️</span>' : ''}`;
+}
+const glowCls = (uid, sid) => (sid && member(sid, uid)?.glow ? ' glow' : '');
 
 function permsIn(sid, uid = S.me.id) {
   const s = server(sid);
@@ -272,7 +297,8 @@ function lightbox(src) {
 
 // ======================================================================= açılış / giriş
 async function boot() {
-  document.documentElement.dataset.theme = store.get('theme', 'dark');
+  applyTheme();
+  pwa.initPwa();
   const m = location.pathname.match(/^\/invite\/([A-Za-z0-9]+)/);
   if (m) { ss.set('invite', m[1]); history.replaceState(null, '', '/channels/@me'); }
   try {
@@ -282,7 +308,14 @@ async function boot() {
     return;
   }
   P = CONFIG.permissions;
+  ctx.CONFIG = CONFIG;
+  ctx.P = P;
   if (!api.token) return showAuth(m ? 'register' : 'login');
+  connect();
+}
+
+function startApp() {
+  root.innerHTML = '<div class="boot"><div class="boot-logo"></div><p>Bağlanılıyor…</p></div>';
   connect();
 }
 
@@ -297,15 +330,18 @@ async function showAuth(mode = 'login') {
     <h1>${reg ? 'Hesap oluştur' : 'Tekrar hoş geldin!'}</h1>
     <p class="sub">${reg ? 'Arkadaşlarınla konuşmaya hemen başla' : 'Seni tekrar gördüğümüze çok sevindik!'}</p>
     ${reg ? '<label class="field"><span>Görünen Ad</span><input class="input" name="display_name" maxlength="32" autocomplete="nickname"></label>' : ''}
-    <label class="field"><span>Kullanıcı Adı <i class="req">*</i></span><input class="input" name="username" maxlength="32" autocomplete="username" autocapitalize="none" required>
+    ${reg ? '<label class="field"><span>E-posta <small style="display:inline;text-transform:none">(isteğe bağlı — şifreni unutursan gerekir)</small></span><input class="input" type="email" name="email" maxlength="254" autocomplete="email"></label>' : ''}
+    <label class="field"><span>${reg ? 'Kullanıcı Adı' : 'Kullanıcı Adı veya E-posta'} <i class="req">*</i></span><input class="input" name="username" maxlength="${reg ? 32 : 254}" autocomplete="username" autocapitalize="none" required>
       ${reg ? '<small>Küçük harf, rakam, alt çizgi ve nokta kullanabilirsin.</small>' : ''}</label>
-    <label class="field"><span>Şifre <i class="req">*</i></span><input class="input" type="password" name="password" autocomplete="${reg ? 'new-password' : 'current-password'}" required></label>
+    <label class="field"><span>Şifre <i class="req">*</i></span><input class="input" type="password" name="password" autocomplete="${reg ? 'new-password' : 'current-password'}" required>
+      ${reg ? '<small>En az 8 karakter.</small>' : '<a class="forgot" data-forgot>Şifreni mi unuttun?</a>'}</label>
     <div class="form-error" id="auth-error"></div>
     <button class="btn block" type="submit">${reg ? 'Devam Et' : 'Giriş Yap'}</button>
     <div class="auth-switch">${reg ? '<a data-mode="login">Zaten bir hesabın var mı?</a>' : 'Bir hesaba mı ihtiyacın var? <a data-mode="register">Kaydol</a>'}</div>
   </form></div>`;
   const form = $('#auth-form');
   form.querySelector('[data-mode]').onclick = (e) => showAuth(e.target.dataset.mode);
+  form.querySelector('[data-forgot]')?.addEventListener('click', () => security.showForgot());
   form.onsubmit = async (e) => {
     e.preventDefault();
     const btn = form.querySelector('button[type=submit]');
@@ -313,10 +349,9 @@ async function showAuth(mode = 'login') {
     if (reg) data.username = data.username.trim().toLowerCase();
     btn.disabled = true;
     try {
-      const { token } = await api.post(reg ? '/auth/register' : '/auth/login', data);
-      api.setToken(token);
-      root.innerHTML = '<div class="boot"><div class="boot-logo"></div><p>Bağlanılıyor…</p></div>';
-      connect();
+      const res = await api.post(reg ? '/auth/register' : '/auth/login', data);
+      if (res.email_verification_sent) toast('E-postana bir doğrulama kodu gönderdik. Ayarlar → Gizlilik ve Güvenlik bölümünden doğrulayabilirsin.');
+      security.handleLogin(res);
     } catch (err) {
       $('#auth-error').textContent = err.message;
       btn.disabled = false;
@@ -334,15 +369,19 @@ async function logout() {
 
 // ======================================================================= gerçek zamanlı bağlantı
 function connect() {
+  if (socket) { socket.auth = { token: api.token }; socket.connect(); return; }
   socket = io({ auth: { token: api.token } });
   socket.on('connect_error', (e) => {
     if (e.message === 'unauthorized') { api.setToken(null); socket.disconnect(); showAuth('login'); }
+    if (e.message === 'password_change_required') { socket.disconnect(); security.showForcedChange(); }
   });
   socket.on('disconnect', () => $('#conn-banner')?.classList.remove('hidden'));
   socket.on('connect', () => $('#conn-banner')?.classList.add('hidden'));
   socket.on('dispatch', ({ t, d }) => {
     try { H[t]?.(d); } catch (e) { console.error('olay hatası', t, e); }
   });
+  acts.initActivities(socket);
+  files.initFiles(socket);
 }
 
 const H = {};
@@ -356,6 +395,11 @@ H.READY = (d) => {
   d.friends.forEach((f) => { upsertUser(f.user); S.friends.set(f.user.id, f.type); });
   d.read_states.forEach((r) => S.read.set(r.channel_id, r.last_message_id));
   d.voice_states.forEach((v) => S.voice.set(v.user_id, v));
+  (d.ghosts || []).forEach((c) => S.channels.set(c.id, c));
+  S.activities.clear();
+  (d.activities || []).forEach((a) => S.activities.set(a.channel_id, a));
+  S.announcement = d.announcement || null;
+  pwa.syncPush();
 
   if (!voice) {
     voice = new VoiceClient({
@@ -388,12 +432,20 @@ function addServer(s) {
     id: s.id, name: s.name, icon: s.icon, owner_id: s.owner_id, system_channel_id: s.system_channel_id, created_at: s.created_at,
     roles: new Map(s.roles.map((r) => [r.id, r])), members: new Map(),
   };
+  Object.assign(srv, { economy: !!s.economy, watch_party: !!s.watch_party, activities: !!s.activities });
   for (const m of s.members) {
     upsertUser(m.user);
-    srv.members.set(m.user.id, { user_id: m.user.id, nickname: m.nickname, roles: m.roles, joined_at: m.joined_at });
+    srv.members.set(m.user.id, memberRecord(m));
   }
   for (const c of s.channels) S.channels.set(c.id, c);
   S.servers.set(s.id, srv);
+}
+
+function memberRecord(m) {
+  return {
+    user_id: m.user.id, nickname: m.nickname, roles: m.roles, joined_at: m.joined_at,
+    xp: m.xp, level: m.level, coins: m.coins, name_color: m.name_color, title: m.title, glow: m.glow, timeout_until: m.timeout_until,
+  };
 }
 
 function addDm(c) {
@@ -415,7 +467,11 @@ function onNewMessage(m) {
   ch.last_message_at = m.created_at;
   const st = S.messages.get(ch.id);
   const isNew = st && !st.list.some((x) => x.id === m.id);
-  if (st && isNew) st.list.push(m);
+  if (st && isNew) {
+    st.list.push(m);
+    // düşük donanım modunda bellekte daha az mesaj tut
+    if (document.documentElement.dataset.lowend && st.list.length > 150 && S.view.cid !== ch.id) { st.list.splice(0, st.list.length - 100); st.hasMore = true; }
+  }
   S.typing.get(ch.id)?.delete(m.author.id);
 
   const mine = m.author.id === S.me.id;
@@ -495,7 +551,7 @@ H.SERVER_CREATE = (s) => {
 H.SERVER_UPDATE = (s) => {
   const srv = server(s.id);
   if (!srv) return;
-  Object.assign(srv, { name: s.name, icon: s.icon, owner_id: s.owner_id, system_channel_id: s.system_channel_id });
+  Object.assign(srv, { name: s.name, icon: s.icon, owner_id: s.owner_id, system_channel_id: s.system_channel_id, economy: !!s.economy, watch_party: !!s.watch_party, activities: !!s.activities });
   renderGuilds();
   if (S.view.sid === s.id) { renderSidebar(); renderMembers(); }
 };
@@ -530,7 +586,7 @@ H.MEMBER_ADD = H.MEMBER_UPDATE = (d) => {
   const s = server(d.server_id);
   if (!s) return;
   upsertUser(d.member.user);
-  s.members.set(d.member.user.id, { user_id: d.member.user.id, nickname: d.member.nickname, roles: d.member.roles, joined_at: d.member.joined_at });
+  s.members.set(d.member.user.id, memberRecord(d.member));
   if (S.view.sid === d.server_id) { renderMembers(); renderSidebar(); }
 };
 
@@ -594,6 +650,71 @@ H.DM_CREATE = (c) => {
   if (S.view.sid === '@me') renderSidebar();
 };
 
+H.NOTICE = (d) => toast(d.text, d.level === 'warn' ? 'error' : 'ok');
+
+H.ANNOUNCEMENT = (d) => { S.announcement = d; renderAnnouncement(); };
+
+H.GHOST_OPEN = (c) => {
+  S.channels.set(c.id, c);
+  if (S.view.sid === c.server_id) renderSidebar();
+};
+
+H.GHOST_CLOSE = (d) => {
+  const c = S.channels.get(d.channel_id);
+  S.channels.delete(d.channel_id);
+  S.messages.delete(d.channel_id);
+  S.ghostPresence.delete(d.channel_id);
+  if (S.view.cid === d.channel_id) navigate(c?.server_id || S.view.sid, null, false);
+  else if (c && S.view.sid === c.server_id) renderSidebar();
+};
+
+H.GHOST_PRESENCE = (d) => {
+  S.ghostPresence.set(d.channel_id, d.users);
+  d.users.forEach((id) => { if (!user(id)) api.get('/users/' + id).then(upsertUser).catch(() => {}); });
+  if (S.view.cid === d.channel_id) renderHeader();
+};
+
+H.ACTIVITY_UPDATE = (d) => {
+  if (d.activity) S.activities.set(d.channel_id, d.activity); else S.activities.delete(d.channel_id);
+  if ((d.server_id || '@me') === S.view.sid) renderSidebar();
+  if (S.view.cid === d.channel_id) acts.renderActivityArea();
+};
+
+H.P2P_OFFER = (o) => {
+  upsertUser(o.from);
+  const list = files.p2pOffers.get(o.channel_id) || [];
+  list.push(o);
+  files.p2pOffers.set(o.channel_id, list.slice(-5));
+  if (S.view.cid === o.channel_id) renderP2P();
+};
+
+H.P2P_CANCEL = (d) => {
+  files.p2pOffers.set(d.channel_id, (files.p2pOffers.get(d.channel_id) || []).filter((o) => o.id !== d.id));
+  if (S.view.cid === d.channel_id) renderP2P();
+};
+
+H.SOUND_CREATE = H.SOUND_DELETE = (d) => invalidateSounds(d.server_id);
+
+H.SOUND_PLAYED = (d) => {
+  if (d.user_id !== S.me.id && !document.documentElement.dataset.lowend) toast(`${d.emoji || '🔊'} ${displayName(d.user_id, voice?.serverId)}: ${d.name}`);
+};
+
+function renderP2P() {
+  const el = $('#p2p-area');
+  if (el) el.innerHTML = files.p2pCardsHTML(S.view.cid);
+}
+
+function renderAnnouncement() {
+  let el = $('#announce');
+  const a = S.announcement;
+  const dismissed = store.get('annDismissed', 0);
+  if (!a || dismissed === a.at) { el?.remove(); return; }
+  if (!el) { el = document.createElement('div'); el.id = 'announce'; document.body.prepend(el); }
+  el.className = `announce ${a.level}`;
+  el.innerHTML = `<span>${a.level === 'warn' ? '⚠️' : a.level === 'success' ? '🎉' : '📢'}</span><div class="grow msg-text">${markdown(a.text)}</div><button class="icon-btn" title="Kapat">${icon('x', 'sm')}</button>`;
+  el.querySelector('button').onclick = () => { store.set('annDismissed', a.at); el.remove(); };
+}
+
 H.VOICE_STATE_UPDATE = (d) => {
   const prev = S.voice.get(d.user_id);
   if (d.channel_id) S.voice.set(d.user_id, d); else S.voice.delete(d.user_id);
@@ -647,14 +768,15 @@ function navigate(sid, cid = null, push = true) {
   renderGuilds();
   renderSidebar();
   renderMain();
+  acts.renderActivityArea();
   if (cid) openChannel(cid);
 }
 
 function openChannel(cid) {
   const ch = S.channels.get(cid);
-  if (!ch || (ch.type !== 'text' && ch.type !== 'dm')) return;
+  if (!ch || !['text', 'dm', 'ghost'].includes(ch.type)) return;
   loadMessages(cid);
-  ackSoon(cid);
+  if (ch.type !== 'ghost') ackSoon(cid);
   refreshCommands(ch.server_id);
 }
 
@@ -694,7 +816,7 @@ function ackSoon(cid) {
   clearTimeout(ackTimers.get(cid));
   ackTimers.set(cid, setTimeout(() => {
     const ch = S.channels.get(cid);
-    if (!ch?.last_message_id || S.read.get(cid) === ch.last_message_id) { S.mentions.delete(cid); return; }
+    if (!ch?.last_message_id || ch.type === 'ghost' || S.read.get(cid) === ch.last_message_id) { S.mentions.delete(cid); return; }
     S.read.set(cid, ch.last_message_id);
     S.mentions.delete(cid);
     api.post(`/channels/${cid}/ack`, { message_id: ch.last_message_id }).catch(() => {});
@@ -719,6 +841,7 @@ function renderApp() {
   </div>
   <div id="conn-banner" class="toasts hidden" style="top:12px;bottom:auto"><div class="toast error">Bağlantı koptu, yeniden bağlanılıyor…</div></div>`;
   renderAll();
+  renderAnnouncement();
 }
 
 function renderAll() {
@@ -755,6 +878,7 @@ function renderGuilds() {
     </div>`;
   }
   html += `<div class="guild add" title="Sunucu Ekle"><button class="guild-btn" data-action="add-server" aria-label="Sunucu ekle">${icon('plus')}</button></div>`;
+  if (pwa.canShowInstall()) html += `<div class="guild add" title="Uygulamayı İndir"><button class="guild-btn" data-action="install" aria-label="Uygulamayı indir">${icon('download')}</button></div>`;
   el.innerHTML = html;
 }
 
@@ -777,7 +901,7 @@ function renderSidebar() {
       const inCall = voiceIn(c.id).length;
       html += `<button class="dm-item ${S.view.cid === c.id ? 'active' : ''} ${unread ? 'unread' : ''}" data-action="dm" data-cid="${c.id}" data-ctx="user" data-uid="${o?.id}">
         ${avatar(o, 32, { status: true })}
-        <div class="meta"><div>${esc(displayName(o?.id))}</div>${inCall ? `<small style="color:var(--green)">🔊 Sesli aramada</small>` : (o?.custom_status ? `<small>${esc(o.custom_status)}</small>` : '')}</div>
+        <div class="meta"><div>${esc(displayName(o?.id))}</div>${inCall ? `<small style="color:var(--green)">🔊 Sesli aramada</small>` : (presenceLine(o) ? `<small>${esc(presenceLine(o))}</small>` : '')}</div>
         ${n ? `<span class="badge">${n}</span>` : ''}
       </button>`;
     }
@@ -790,7 +914,9 @@ function renderSidebar() {
     const manage = can(s.id, P.MANAGE_CHANNELS);
     const cats = chans.filter((c) => c.type === 'category');
     const loose = chans.filter((c) => c.type !== 'category' && (!c.parent_id || !S.channels.has(c.parent_id)));
-    let html = loose.map(channelItem).join('');
+    const ghosts = chans.filter((c) => c.type === 'ghost');
+    let html = ghosts.length ? `<div class="category ghost-cat"><span class="name">👻 Hayalet Kanallar</span></div>${ghosts.map(channelItem).join('')}` : '';
+    html += loose.filter((c) => c.type !== 'ghost').map(channelItem).join('');
     for (const cat of cats) {
       const kids = chans.filter((c) => c.parent_id === cat.id);
       const collapsed = S.collapsed.has(cat.id);
@@ -810,8 +936,10 @@ function channelItem(c) {
   const isVoice = c.type === 'voice';
   const n = S.mentions.get(c.id);
   const manage = can(c.server_id, P.MANAGE_CHANNELS);
-  let html = `<div class="channel ${S.view.cid === c.id ? 'active' : ''} ${isUnread(c) ? 'unread' : ''}" data-action="channel" data-cid="${c.id}" data-ctx="channel">
-    ${icon(isVoice ? 'speaker' : 'hash')}<span class="name">${esc(c.name)}</span>
+  const act = S.activities.get(c.id);
+  let html = `<div class="channel ${S.view.cid === c.id ? 'active' : ''} ${isUnread(c) ? 'unread' : ''} ${c.type === 'ghost' ? 'ghost' : ''}" data-action="channel" data-cid="${c.id}" data-ctx="channel">
+    ${c.type === 'ghost' ? '<span class="ghost-ic">👻</span>' : icon(isVoice ? 'speaker' : 'hash')}<span class="name">${esc(c.name)}</span>
+    ${act ? `<span class="act-ind" title="${esc(acts.GAMES[act.type]?.name || '')}">${acts.GAMES[act.type]?.emoji || '🎮'}</span>` : ''}
     ${n ? `<span class="badge">${n}</span>` : ''}
     <span class="tools">
       ${can(c.server_id, P.CREATE_INVITE) ? `<button data-action="invite" data-sid="${c.server_id}" title="Davet Oluştur">${icon('userPlus', 'sm')}</button>` : ''}
@@ -847,8 +975,18 @@ function renderVoicePanel() {
     <div class="acts">
       <button class="${voice.videoKind === 'camera' ? 'on' : ''}" data-action="voice-camera" title="Kamera">${icon('video', 'sm')}</button>
       <button class="${voice.videoKind === 'screen' ? 'on' : ''}" data-action="voice-screen" title="Ekran Paylaş">${icon('screen', 'sm')}</button>
+      <button class="${voice.filter !== 'none' || voice.mode !== 'vad' ? 'on' : ''}" data-action="soundboard" title="Ses Efektleri, Filtreler ve Telsiz">🔊</button>
+      <button class="${clips.clipActive() ? 'rec' : ''}" data-action="clip-toggle" title="${clips.clipActive() ? 'Klip modu açık — Alt+C ile kaydet, kapatmak için tıkla' : 'Klip Modu (son 30 sn kaydedici)'}">🎬</button>
       <button data-action="goto-voice" title="Aramayı Göster">${icon('maximize', 'sm')}</button>
-    </div></div>`;
+    </div>
+    ${voice.mode !== 'vad' ? `<button class="ptt-btn ${voice.pttActive ? 'on' : ''}" id="ptt-btn">${voice.mode === 'walkie' ? '📻' : '🎙️'} ${voice.pttActive ? 'Konuşuyorsun…' : `Konuşmak için basılı tut (${esc(keyName(voice.pttKey))})`}</button>` : ''}
+    ${clips.clipActive() ? '<button class="clip-save" data-action="clip-save">● Son 30 sn\'yi kaydet (Alt+C)</button>' : ''}
+    ${VOICE_FILTERS[voice.filter] && voice.filter !== 'none' ? `<small class="muted" style="display:block;margin-top:4px">Filtre: ${VOICE_FILTERS[voice.filter]}</small>` : ''}</div>`;
+  const ptt = $('#ptt-btn');
+  if (ptt) {
+    ptt.onpointerdown = (e) => { e.preventDefault(); voice.setPtt(true); };
+    ptt.onpointerup = ptt.onpointerleave = ptt.onpointercancel = () => voice.setPtt(false);
+  }
 }
 
 function renderUserPanel() {
@@ -859,7 +997,7 @@ function renderUserPanel() {
   const deaf = voice?.deafened;
   el.innerHTML = `<div class="me" data-action="status-menu" title="Durumunu ayarla">
       ${avatar({ ...me, status: me.status_setting === 'invisible' ? 'offline' : me.status_setting }, 32, { status: true })}
-      <div class="meta"><b>${esc(me.display_name)}</b><small>${esc(me.custom_status || STATUS_LABEL[me.status_setting] || me.username)}</small></div>
+      <div class="meta"><b>${esc(me.display_name)}</b><small>${esc(me.muted_until && me.muted_until > Date.now() ? '🔇 Susturuldun' : presenceLine(me) || STATUS_LABEL[me.status_setting] || me.username)}</small></div>
     </div>
     <button class="icon-btn ${muted ? 'red' : ''}" data-action="toggle-mute" title="${muted ? 'Sesi Aç' : 'Sustur'}">${icon(muted ? 'micOff' : 'mic')}</button>
     <button class="icon-btn ${deaf ? 'red' : ''}" data-action="toggle-deafen" title="${deaf ? 'Sağırlaştırmayı Kaldır' : 'Sağırlaştır'}">${icon(deaf ? 'headphonesOff' : 'headphones')}</button>
@@ -877,13 +1015,15 @@ function renderMain() {
     el.innerHTML = `<header class="main-header">${menuBtn}</header><div class="empty"><div class="art">🌌</div><p>Bu sunucuda metin kanalı yok.</p></div>`;
     return;
   }
-  if (ch.type === 'voice') return renderVoiceView(ch);
-  const isServer = !!ch.server_id;
+  if (ch.type === 'voice') { renderVoiceView(ch); acts.renderActivityArea(); return; }
+  const isServer = !!ch.server_id && ch.type !== 'ghost';
   el.innerHTML = `<header class="main-header" id="main-header"></header>
     <div id="call-banner"></div>
+    <div id="activity-area" class="activity-area"></div>
     <div class="main-body">
-      <section class="chat" id="chat">
+      <section class="chat ${ch.type === 'ghost' ? 'ghost-chat' : ''}" id="chat">
         <div class="messages scroll" id="messages"><div class="load-more">Yükleniyor…</div></div>
+        <div id="p2p-area"></div>
         <div class="composer-wrap" id="composer-wrap">
           <div id="autocomplete"></div>
           <div id="composer-extra"></div>
@@ -903,6 +1043,8 @@ function renderMain() {
   renderCallBanner();
   renderMembers();
   setupComposer(ch);
+  renderP2P();
+  acts.renderActivityArea();
   const box = $('#messages');
   box.addEventListener('scroll', () => {
     S.stick = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
@@ -921,18 +1063,27 @@ function renderHeader() {
   if (ch.type === 'dm') {
     const o = dmOther(ch);
     el.innerHTML = `${menuBtn}<div class="title">${avatar(o, 24, { status: true })}<span data-user="${o?.id}" style="cursor:pointer">${esc(displayName(o?.id))}</span>${o?.is_bot ? '<span class="bot-tag">BOT</span>' : ''}</div>
-      ${o?.custom_status ? `<div class="topic">${esc(o.custom_status)}</div>` : '<div class="spacer"></div>'}
+      ${presenceLine(o) ? `<div class="topic">${esc(presenceLine(o))}</div>` : '<div class="spacer"></div>'}
       <div class="tools">
         <button class="icon-btn" data-action="call" title="Sesli Arama Başlat">${icon('phone')}</button>
         <button class="icon-btn" data-action="call-video" title="Görüntülü Arama Başlat">${icon('video')}</button>
+        <button class="icon-btn" data-action="act-start" title="Etkinlik Başlat (oyun / birlikte izle)">🎮</button>
         <button class="icon-btn" data-action="pins" title="Sabitlenmiş Mesajlar">${icon('pin')}</button>
         <button class="icon-btn" data-action="profile" data-uid="${o?.id}" title="Kullanıcı Profili">${icon('users')}</button>
         <input class="search" id="search" placeholder="Ara">
       </div>`;
+  } else if (ch.type === 'ghost') {
+    const inside = S.ghostPresence.get(ch.id) || [];
+    el.innerHTML = `${menuBtn}<div class="title"><span>👻</span><span>${esc(ch.name)}</span></div>
+      <div class="topic">Hayalet kanal • mesajlar hiçbir yere kaydedilmez • içeride: ${inside.map((id) => esc(displayName(id, ch.server_id))).join(', ') || 'yalnızca sen'}</div>
+      <div class="tools"><button class="btn red sm" data-action="ghost-leave">Kanaldan Çık ve Sil</button></div>`;
+    return;
   } else {
     el.innerHTML = `${menuBtn}<div class="title">${icon('hash')}<span>${esc(ch.name)}</span></div>
       ${ch.topic ? `<div class="topic" data-action="show-topic" title="${esc(ch.topic)}">${esc(ch.topic)}</div>` : '<div class="spacer"></div>'}
       <div class="tools">
+        <button class="icon-btn" data-action="act-start" title="Etkinlik Başlat (oyun / birlikte izle)">🎮</button>
+        ${server(ch.server_id)?.economy ? `<button class="icon-btn" data-action="shop" title="Coin, Seviye ve Mağaza">🪙</button>` : ''}
         <button class="icon-btn" data-action="pins" title="Sabitlenmiş Mesajlar">${icon('pin')}</button>
         <button class="icon-btn ${S.showMembers ? 'active' : ''}" data-action="toggle-members" title="Üye Listesi">${icon('users')}</button>
         <input class="search" id="search" placeholder="${esc(server(ch.server_id)?.name || '')} içinde ara">
@@ -947,6 +1098,10 @@ function chatStart(ch) {
     const o = dmOther(ch);
     return `<div class="chat-start">${avatar(o, 80)}<h2>${esc(displayName(o?.id))}</h2>
       <p>Bu, <b>@${esc(o?.username)}</b> ile olan direkt mesaj geçmişinin başlangıcı.</p></div>`;
+  }
+  if (ch.type === 'ghost') {
+    return `<div class="chat-start"><div class="big-icon" style="font-size:40px">👻</div><h2>#${esc(ch.name)} — Hayalet Kanal</h2>
+      <p>Burada yazılanlar <b>hiçbir yere kaydedilmez</b>. Yalnızca şu an kanalın içinde olanlar görür; kanaldan çıktığında mesajlar ekranından da silinir.</p></div>`;
   }
   return `<div class="chat-start"><div class="big-icon">${icon('hash')}</div><h2>#${esc(ch.name)} kanalına hoş geldin!</h2>
     <p>Bu, #${esc(ch.name)} kanalının başlangıcı.${ch.topic ? ' ' + esc(ch.topic) : ''}</p></div>`;
@@ -973,6 +1128,7 @@ function renderMessages(mode) {
   else if (mode === 'prepend') box.scrollTop = box.scrollHeight - prevH + prevTop;
   else box.scrollTop = prevTop;
   watchMedia(box);
+  highlightIn(box);
 }
 
 function watchMedia(box) {
@@ -997,6 +1153,7 @@ function appendMessage(m) {
   box.insertAdjacentHTML('beforeend', html + messageHTML(m, prev, ch));
   if (stick) { box.scrollTop = box.scrollHeight; S.stick = true; }
   watchMedia(box);
+  highlightIn(box);
 }
 
 function replaceMessage(id) {
@@ -1013,6 +1170,7 @@ function replaceMessage(id) {
     if (ta) ta.value = editingText;
   }
   watchMedia(box);
+  highlightIn(box);
 }
 
 function attachmentHTML(a) {
@@ -1021,8 +1179,10 @@ function attachmentHTML(a) {
   if (/^image\/(png|jpe?g|gif|webp)/.test(ct)) return `<img class="att-img" src="${url}" alt="${esc(a.filename)}" loading="lazy" data-action="lightbox" data-src="${url}">`;
   if (/^video\/(mp4|webm|quicktime)/.test(ct)) return `<video class="att-video" src="${url}" controls preload="metadata"></video>`;
   if (/^audio\//.test(ct)) return `<div class="att-file"><span class="fi">${icon('file')}</span><div class="grow"><a href="${url}" target="_blank" rel="noopener">${esc(a.filename)}</a><audio class="att-audio" src="${url}" controls preload="none"></audio></div></div>`;
-  return `<div class="att-file"><span class="fi">${icon('file')}</span><div class="grow"><a href="${url}" target="_blank" rel="noopener" download="${esc(a.filename)}">${esc(a.filename)}</a><small>${fmtSize(a.size)}</small></div>
-    <a class="icon-btn" href="${url}" download="${esc(a.filename)}" title="İndir">${icon('download')}</a></div>`;
+  const pk = files.previewKind(a);
+  const pv = pk ? `<button class="btn secondary sm" data-action="${pk === '3d' ? 'preview-3d' : 'preview-code'}" data-url="${url}" data-name="${esc(a.filename)}" data-size="${a.size}">${pk === '3d' ? '🧊 3D Önizle' : '👁 Önizle'}</button>` : '';
+  return `<div class="att-file"><span class="fi">${pk === '3d' ? '🧊' : icon('file')}</span><div class="grow"><a href="${url}" target="_blank" rel="noopener" download="${esc(a.filename)}">${esc(a.filename)}</a><small>${fmtSize(a.size)}</small></div>
+    ${pv}<a class="icon-btn" href="${url}" download="${esc(a.filename)}" title="İndir">${icon('download')}</a></div>`;
 }
 
 function embedHTML(e, ctx) {
@@ -1048,6 +1208,10 @@ function messageHTML(m, prev, ch) {
     return `<div class="msg system" data-mid="${m.id}"><div class="sys-icon">${icon('arrowJoin')}</div>
       <div class="msg-body"><b data-user="${u.id}"${style}>${name}</b> sunucuya katıldı. Hoş geldin! 👋 <span class="msg-time">${fmtTime(m.created_at)}</span></div></div>`;
   }
+  if (m.type === 8) {
+    return `<div class="msg system" data-mid="${m.id}"><div class="sys-icon">⭐</div>
+      <div class="msg-body"><b data-user="${u.id}"${style}>${name}</b> ${componentHTML(m, sid)} <span class="msg-time">${fmtTime(m.created_at)}</span></div></div>`;
+  }
   const grouped = prev && prev.type === 0 && prev.author.id === u.id && !m.reply_to && m.created_at - prev.created_at < 7 * 60e3 && isSameDay(prev.created_at, m.created_at);
   const ctx = { mentionNames: new Set(m.mentions.map((id) => user(id)?.username).filter(Boolean)), everyone: m.mention_everyone };
   const mentioned = m.mention_everyone || m.mentions.includes(S.me.id) || (m.referenced?.author?.id === S.me.id && u.id !== S.me.id);
@@ -1068,16 +1232,22 @@ function messageHTML(m, prev, ch) {
   const reactions = m.reactions.length ? `<div class="reactions">${m.reactions.map((r) => `<button class="reaction ${r.users.includes(S.me.id) ? 'me' : ''}" data-action="toggle-react" data-mid="${m.id}" data-emoji="${esc(r.emoji)}" title="${esc(r.users.slice(0, 10).map((id) => displayName(id, sid)).join(', '))}">${esc(r.emoji)}<b>${r.count}</b></button>`).join('')}
     <button class="reaction add" data-action="react-picker" data-mid="${m.id}" title="Tepki Ekle">${icon('smilePlus', 'sm')}</button></div>` : '';
   const canManage = !sid || can(sid, P.MANAGE_MESSAGES);
+  if (m.ghost) {
+    return `<div class="msg ghost-msg ${grouped ? 'grouped' : ''} ${mentioned ? 'mentioned' : ''}" data-mid="${m.id}">
+      ${grouped ? `<div class="msg-side">${timeHM(m.created_at)}</div>` : `<div class="msg-avatar" data-user="${u.id}">${avatar(u, 40)}</div>`}
+      <div class="msg-body">${grouped ? '' : `<div class="msg-head"><span class="msg-author${glowCls(u.id, sid)}" data-user="${u.id}"${style}>${name}</span><span class="msg-time">${fmtTime(m.created_at)} • 👻 kaydedilmiyor</span></div>`}${text}</div></div>`;
+  }
   return `<div class="msg ${grouped ? 'grouped' : ''} ${mentioned ? 'mentioned' : ''} ${editing ? 'editing' : ''}" data-mid="${m.id}" data-ctx="message">
     ${reply}
     ${grouped
       ? `<div class="msg-side" title="${esc(fmtTime(m.created_at))}">${timeHM(m.created_at)}</div>`
       : `<div class="msg-avatar" data-user="${u.id}">${avatar(u, 40)}</div>`}
     <div class="msg-body">
-      ${grouped ? '' : `<div class="msg-head"><span class="msg-author" data-user="${u.id}"${style}>${name}</span>${u.is_bot ? `<span class="bot-tag">${icon('check', 'xs')}BOT</span>` : ''}<span class="msg-time" title="${esc(new Date(m.created_at).toLocaleString('tr-TR'))}">${fmtTime(m.created_at)}</span></div>`}
+      ${grouped ? '' : `<div class="msg-head"><span class="msg-author${glowCls(u.id, sid)}" data-user="${u.id}"${style}>${name}</span>${nameExtras(u.id, sid)}${u.is_bot ? `<span class="bot-tag">${icon('check', 'xs')}BOT</span>` : ''}<span class="msg-time" title="${esc(new Date(m.created_at).toLocaleString('tr-TR'))}">${fmtTime(m.created_at)}</span></div>`}
       ${text}
       ${m.attachments.length ? `<div class="attachments">${m.attachments.map(attachmentHTML).join('')}</div>` : ''}
       ${m.embeds.map((e) => embedHTML(e, ctx)).join('')}
+      ${m.components ? componentHTML(m, sid) : ''}
       ${reactions}
     </div>
     <div class="msg-actions">
@@ -1167,7 +1337,42 @@ const BUILTIN_COMMANDS = [
   { name: 'spoiler', description: 'Mesajını spoiler olarak gönderir', run: (t) => (t ? `||${t}||` : '') },
   { name: 'me', description: 'Mesajını italik yapar', run: (t) => (t ? `*${t}*` : '') },
   { name: 'nick', description: 'Bu sunucudaki takma adını değiştirir', server: true, run: (t, ch) => { changeNick(ch.server_id, S.me.id, t); return null; } },
+  { name: 'anket', description: 'Canlı anket oluşturur', run: (t, ch) => { pollModal(ch); return null; } },
+  { name: 'yapilacaklar', description: 'Ortak yapılacaklar listesi oluşturur', run: (t, ch) => { todoModal(ch); return null; } },
+  { name: 'oyun', description: 'Mini oyun veya birlikte izleme başlatır', run: (t, ch) => { acts.pickActivity(ch); return null; } },
+  { name: 'izle', description: 'Birlikte izleme başlatır', usage: '[bağlantı]', run: (t, ch) => { startWatch(ch, t); return null; } },
+  { name: 'kod', description: 'Kod çalıştırıcıyı açar (JS / Python)', run: (t, ch) => { sandboxModal(ch); return null; } },
+  { name: 'gunluk', description: 'Günlük coin ödülünü alır', server: true, run: (t, ch) => { claimDaily(ch.server_id); return null; } },
+  { name: 'bakiye', description: 'Coin, seviye ve mağaza', server: true, run: (t, ch) => { shopModal(ch.server_id, 'me'); return null; } },
+  { name: 'magaza', description: 'Coin mağazasını açar', server: true, run: (t, ch) => { shopModal(ch.server_id, 'shop'); return null; } },
+  { name: 'siralama', description: 'Seviye sıralamasını gösterir', server: true, run: (t, ch) => { shopModal(ch.server_id, 'top'); return null; } },
+  { name: 'ghost', description: 'Şifreyle hayalet kanal açar', usage: '<şifre>', server: true, run: (t, ch) => { unlockGhost(ch.server_id, t); return null; } },
+  { name: 'hayalet', description: 'Şifreyle hayalet kanal açar', usage: '<şifre>', server: true, run: (t, ch) => { unlockGhost(ch.server_id, t); return null; } },
+  { name: 'durum', description: 'Özel durumunu (rich presence) tasarlar', run: () => { presenceEditor(); return null; } },
 ];
+
+async function unlockGhost(sid, password) {
+  if (!password) {
+    password = await promptDialog('👻 Hayalet Kanala Gir', 'Gizli şifre', '', { sub: 'Bu sunucudaki bir hayalet kanalın şifresini gir.', ok: 'Gir', max: 64 });
+    if (!password) return;
+  }
+  try {
+    const c = await api.post(`/servers/${sid}/ghost/unlock`, { password });
+    S.channels.set(c.id, c);
+    navigate(sid, c.id);
+  } catch (e) { fail(e); }
+}
+
+async function startWatch(ch, url) {
+  if (!S.activities.has(ch.id)) {
+    const r = await new Promise((res) => socket.emit('act:start', { channel_id: ch.id, type: 'watch' }, res));
+    if (!r?.ok) return toast(r?.error || 'Başlatılamadı', 'error');
+    S.activities.set(ch.id, r.activity);
+    acts.renderActivityArea();
+    await acts.joinActivity(ch.id, true);
+  } else await acts.joinActivity(ch.id, true);
+  if (url) setTimeout(() => socket.emit('act:input', { channel_id: ch.id, data: { cmd: 'load', url } }), 300);
+}
 
 function renderComposerState() {
   const ch = curChannel();
@@ -1334,7 +1539,7 @@ function updateAutocomplete() {
     const q = m[1].toLowerCase();
     refreshCommands(ch.server_id);
     const list = [
-      ...BUILTIN_COMMANDS.filter((c) => !c.server || ch.server_id).map((c) => ({ name: c.name, description: c.description, src: 'Biscord' })),
+      ...BUILTIN_COMMANDS.filter((c) => !c.server || ch.server_id).map((c) => ({ name: c.name, description: c.description, usage: c.usage, src: 'Biscord' })),
       ...(S.commands.get(ch.server_id)?.list || []).map((c) => ({ name: c.name, description: c.description, usage: c.usage, src: c.bot.display_name })),
     ];
     acState.items = list.filter((c) => c.name.startsWith(q)).slice(0, 12).map((c) => ({
@@ -1429,9 +1634,9 @@ function renderMembers() {
     const v = S.voice.get(m.user_id);
     return `<div class="member ${u.status === 'offline' ? 'offline' : ''}" data-action="profile" data-uid="${u.id}" data-ctx="user" data-sid="${s.id}">
       ${avatar(u, 32, { status: true })}
-      <div class="meta"><div><span${color ? ` style="color:${esc(color)}"` : ''}>${esc(displayName(u.id, s.id))}</span>
-        ${u.is_bot ? '<span class="bot-tag">BOT</span>' : ''}${s.owner_id === u.id ? `<span class="crown" title="Sunucu Sahibi">${icon('crown', 'xs')}</span>` : ''}</div>
-        ${v?.server_id === s.id ? `<small>🔊 ${esc(S.channels.get(v.channel_id)?.name || 'Seste')}</small>` : u.custom_status ? `<small>${esc(u.custom_status)}</small>` : ''}</div>
+      <div class="meta"><div><span class="${glowCls(u.id, s.id)}"${color ? ` style="color:${esc(color)}"` : ''}>${esc(displayName(u.id, s.id))}</span>
+        ${u.is_bot ? '<span class="bot-tag">BOT</span>' : ''}${s.owner_id === u.id ? `<span class="crown" title="Sunucu Sahibi">${icon('crown', 'xs')}</span>` : ''}${m.title ? `<span class="title-chip">${esc(m.title)}</span>` : ''}</div>
+        ${v?.server_id === s.id ? `<small>🔊 ${esc(S.channels.get(v.channel_id)?.name || 'Seste')}</small>` : presenceLine(u) ? `<small>${esc(presenceLine(u))}</small>` : ''}</div>
     </div>`;
   };
   let html = '';
@@ -1518,7 +1723,9 @@ async function openDm(uid) {
 function renderVoiceView(ch) {
   const el = $('#main');
   el.innerHTML = `<header class="main-header">${menuBtn}<div class="title">${icon('speaker')}<span>${esc(ch.name)}</span></div><div class="spacer"></div>
-    ${can(ch.server_id, P.CREATE_INVITE) ? `<div class="tools"><button class="icon-btn" data-action="invite" data-sid="${ch.server_id}" title="Davet Et">${icon('userPlus')}</button></div>` : ''}</header>
+    <div class="tools"><button class="icon-btn" data-action="act-start" title="Etkinlik Başlat (oyun / birlikte izle)">🎮</button>
+    ${can(ch.server_id, P.CREATE_INVITE) ? `<button class="icon-btn" data-action="invite" data-sid="${ch.server_id}" title="Davet Et">${icon('userPlus')}</button>` : ''}</div></header>
+    <div id="activity-area" class="activity-area"></div>
     <div class="voice-view" id="stage" data-stage="${ch.id}"></div>`;
   renderStage();
 }
@@ -1574,6 +1781,8 @@ function renderStage() {
       <button class="vc-btn ${voice.videoKind === 'screen' ? 'on' : ''}" data-action="voice-screen" title="Ekran Paylaş">${icon('screen')}</button>
       <button class="vc-btn ${muted ? 'off' : ''}" data-action="toggle-mute" title="Mikrofon">${icon(muted ? 'micOff' : 'mic')}</button>
       <button class="vc-btn ${voice.deafened ? 'off' : ''}" data-action="toggle-deafen" title="Ses">${icon(voice.deafened ? 'headphonesOff' : 'headphones')}</button>
+      <button class="vc-btn ${voice.filter !== 'none' || voice.mode !== 'vad' ? 'on' : ''}" data-action="soundboard" title="Ses Efektleri ve Filtreler"><span style="font-size:22px">🔊</span></button>
+      <button class="vc-btn ${clips.clipActive() ? 'off' : ''}" data-action="${clips.clipActive() ? 'clip-save' : 'clip-toggle'}" title="${clips.clipActive() ? 'Son 30 saniyeyi kaydet (Alt+C)' : 'Klip Modu'}"><span style="font-size:22px">🎬</span></button>
       <button class="vc-btn leave" data-action="voice-leave" title="Bağlantıyı Kes">${icon('phoneOff')}</button>
     </div>`;
   $$('video[data-video]', el).forEach((v) => {
@@ -1641,11 +1850,12 @@ function showProfile(uid, anchor, sid = S.view.sid !== '@me' ? S.view.sid : null
     <div class="profile-head">${avatar(u, 80, { status: true })}
       ${uid !== S.me.id ? `<div class="row" style="margin-bottom:8px">${S.friends.get(uid) === 'friend' || u.is_bot ? '' : `<button class="btn sm green" data-pa="friend">${icon('userPlus', 'sm')}</button>`}</div>` : `<button class="btn sm secondary" data-pa="edit" style="margin-bottom:8px">Profili Düzenle</button>`}</div>
     <div class="profile-card">
-      <h3>${esc(displayName(uid, sid))}${u.is_bot ? '<span class="bot-tag">BOT</span>' : ''}</h3>
+      <h3><span class="${glowCls(uid, sid)}">${esc(displayName(uid, sid))}</span>${u.is_bot ? '<span class="bot-tag">BOT</span>' : ''}${nameExtras(uid, sid)}</h3>
       <div class="uname">${esc(u.username)}${m?.nickname ? ` • ${esc(u.display_name)}` : ''}</div>
-      ${u.custom_status ? `<p style="margin-top:8px">${esc(u.custom_status)}</p>` : ''}
+      ${presenceCard(u)}
       <hr>
       ${u.about ? `<h5>Hakkımda</h5><p>${markdown(u.about)}</p>` : ''}
+      ${m && server(sid)?.economy && !u.is_bot ? `<h5>Seviye</h5><p>⭐ Seviye ${m.level || 0} • 🪙 ${Number(m.coins || 0).toLocaleString('tr-TR')} coin</p>` : ''}
       <h5>Biscord Üyeliği</h5><p>${fmtDay(u.created_at)}${m ? ` • Sunucuya katılım: ${fmtDay(m.joined_at)}` : ''}</p>
       ${sid && m ? `<h5>Roller</h5><div class="role-chips">${roles.map((r) => `<span class="role-chip"><i style="background:${esc(r.color || '#99aab5')}"></i>${esc(r.name)}</span>`).join('') || '<span class="muted" style="font-size:13px">Rol yok</span>'}
         ${can(sid, P.MANAGE_ROLES) && (uid === S.me.id || outranks(sid, uid)) ? `<button class="role-chip" data-pa="roles" title="Rolleri düzenle">${icon('plus', 'xs')}</button>` : ''}</div>` : ''}
@@ -1687,6 +1897,10 @@ function serverMenu(anchor) {
     settingsAccess && { label: 'Sunucu Ayarları', icon: 'gear', action: () => openServerSettings(s.id) },
     can(s.id, P.MANAGE_CHANNELS) && { label: 'Kanal Oluştur', icon: 'plusCircle', action: () => createChannelModal(s.id) },
     can(s.id, P.MANAGE_CHANNELS) && { label: 'Kategori Oluştur', icon: 'plus', action: () => createChannelModal(s.id, null, 'category') },
+    can(s.id, P.MANAGE_CHANNELS) && { label: 'Hayalet Kanal Oluştur', icon: 'shield', action: () => createChannelModal(s.id, null, 'ghost') },
+    '-',
+    s.economy && { label: 'Coin, Seviye ve Mağaza', icon: 'crown', action: () => shopModal(s.id) },
+    { label: 'Hayalet Kanala Gir…', icon: 'shield', action: () => unlockGhost(s.id) },
     '-',
     { label: 'Takma Adı Değiştir', icon: 'edit', action: () => changeNick(s.id, S.me.id) },
     { label: 'Tümünü Okundu İşaretle', icon: 'check', action: () => markServerRead(s.id) },
@@ -1832,11 +2046,9 @@ function statusMenu(anchor) {
   const item = (s) => ({ html: `<button data-st="${s}" style="${st === s ? 'background:var(--bg-active)' : ''}"><span class="row">${dot(s)} ${STATUS_LABEL[s]}</span></button>` });
   const el = menuAt(anchor, [
     item('online'), item('idle'), item('dnd'), item('invisible'), '-',
-    { label: S.me.custom_status ? 'Özel Durumu Düzenle' : 'Özel Durum Ayarla', icon: 'smile', action: async () => {
-      const v = await promptDialog('Özel Durum Ayarla', 'Ne yapıyorsun?', S.me.custom_status || '', { max: 128 });
-      if (v !== null) api.patch('/users/@me', { custom_status: v }).then((u) => H.ME_UPDATE(u), fail);
-    } },
+    { label: S.me.presence ? 'Durumunu Düzenle' : 'Durumunu Tasarla ✨', icon: 'smile', action: () => presenceEditor() },
     { label: 'Profil', icon: 'users', action: () => showProfile(S.me.id, anchor) },
+    S.me.is_admin && { label: 'Yönetim Paneli', icon: 'shield', action: () => openAdminPanel() },
     { label: 'Kullanıcı Kimliğini Kopyala', icon: 'copy', action: () => copy(S.me.id) },
   ], { above: true });
   el.addEventListener('click', (e) => { const b = e.target.closest('[data-st]'); if (b) { closeFloating(); set(b.dataset.st); } });
@@ -1997,18 +2209,22 @@ function createChannelModal(sid, parentId = null, type = 'text') {
     sub: !isCat && parentId ? `${esc(S.channels.get(parentId)?.name || '')} kategorisinde` : '',
     body: `${isCat ? '' : `<div class="field"><span>Kanal Türü</span>
         <label class="radio-card">${icon('hash')}<div class="grow"><b>Metin</b><small>Mesaj, resim, GIF, emoji, fikir ve şaka gönder</small></div><input type="radio" name="ct" value="text" checked></label>
-        <label class="radio-card">${icon('speaker')}<div class="grow"><b>Ses</b><small>Sesli, görüntülü ve ekran paylaşımıyla takılın</small></div><input type="radio" name="ct" value="voice"></label></div>`}
+        <label class="radio-card">${icon('speaker')}<div class="grow"><b>Ses</b><small>Sesli, görüntülü ve ekran paylaşımıyla takılın</small></div><input type="radio" name="ct" value="voice"></label>
+        <label class="radio-card"><span style="font-size:20px">👻</span><div class="grow"><b>Hayalet</b><small>Listede görünmez, şifreyle açılır, mesajlar hiçbir yere kaydedilmez</small></div><input type="radio" name="ct" value="ghost" ${type === 'ghost' ? 'checked' : ''}></label></div>`}
       <label class="field"><span>${isCat ? 'Kategori Adı' : 'Kanal Adı'}</span><input class="input" id="ch-name" maxlength="100" placeholder="${isCat ? 'Yeni Kategori' : 'yeni-kanal'}"></label>
+      <label class="field ${type === 'ghost' ? '' : 'hidden'}" id="ch-pw-f"><span>Gizli Şifre</span><input class="input" id="ch-pw" type="password" maxlength="64" placeholder="En az 4 karakter"><small>Üyeler bu kanala <b>/ghost şifre</b> yazarak girer. Şifreyi yalnızca istediğin kişilere söyle.</small></label>
       <div class="form-error" id="ch-err"></div>`,
     foot: `<button class="btn ghost" data-close>İptal</button><button class="btn" data-ok>${isCat ? 'Kategori Oluştur' : 'Kanal Oluştur'}</button>`,
     onMount(m, close) {
+      m.querySelectorAll('[name=ct]').forEach((r) => r.onchange = () => m.querySelector('#ch-pw-f').classList.toggle('hidden', r.value !== 'ghost' || !r.checked));
+      if (type === 'ghost') { const r = m.querySelector('[name=ct][value=text]'); if (r) r.checked = false; }
       const go = async () => {
         const t = isCat ? 'category' : m.querySelector('[name=ct]:checked').value;
         try {
-          const c = await api.post(`/servers/${sid}/channels`, { name: m.querySelector('#ch-name').value, type: t, parent_id: parentId });
+          const c = await api.post(`/servers/${sid}/channels`, { name: m.querySelector('#ch-name').value, type: t, parent_id: parentId, password: m.querySelector('#ch-pw')?.value });
           S.channels.set(c.id, c);
           close();
-          if (t === 'text') navigate(sid, c.id); else renderSidebar();
+          if (t === 'text' || t === 'ghost') navigate(sid, c.id); else renderSidebar();
         } catch (e) { m.querySelector('#ch-err').textContent = e.message; }
       };
       m.querySelector('[data-ok]').onclick = go;
@@ -2166,12 +2382,26 @@ function openUserSettings(initial = 'account') {
   openSettingsShell({
     initial,
     sections: [
-      { label: 'Kullanıcı Ayarları', items: [{ id: 'account', label: 'Hesabım' }, { id: 'profile', label: 'Profiller' }] },
-      { label: 'Uygulama Ayarları', items: [{ id: 'voice', label: 'Ses ve Görüntü' }, { id: 'appearance', label: 'Görünüm' }, { id: 'notifications', label: 'Bildirimler' }] },
+      { label: 'Kullanıcı Ayarları', items: [{ id: 'account', label: 'Hesabım' }, { id: 'profile', label: 'Profiller' }, { id: 'security', label: 'Gizlilik ve Güvenlik' }] },
+      { label: 'Uygulama Ayarları', items: [{ id: 'voice', label: 'Ses ve Görüntü' }, { id: 'appearance', label: 'Görünüm ve Tema' }, { id: 'notifications', label: 'Bildirimler' }, { id: 'install', label: 'Uygulamayı İndir' }] },
       { label: 'Geliştirici', items: [{ id: 'bots', label: 'Botlarım' }] },
+      ...(S.me.is_admin ? [{ label: 'Site', items: [{ id: 'admin', label: '🛡️ Yönetim Paneli', action: (ctl) => { ctl.close(); openAdminPanel(); } }] }] : []),
       { label: '', items: [{ id: 'logout', label: 'Çıkış Yap', danger: true, action: async () => { if (await confirmDialog('Çıkış Yap', 'Çıkış yapmak istediğine emin misin?', 'Çıkış Yap')) logout(); } }] },
     ],
     render: (id, el, ctl) => USER_PAGES[id](el, ctl),
+  });
+}
+
+function changePasswordModal() {
+  modal({
+    title: 'Şifreni güncelle', sub: 'Mevcut şifreni ve yeni şifreni gir. Diğer cihazlardaki oturumların kapanır.',
+    body: '<label class="field"><span>Mevcut Şifre</span><input class="input" type="password" id="pw-old" autocomplete="current-password"></label><label class="field"><span>Yeni Şifre</span><input class="input" type="password" id="pw-new" autocomplete="new-password"><small>En az 8 karakter</small></label><div class="form-error" id="pw-err"></div>',
+    foot: '<button class="btn ghost" data-close>İptal</button><button class="btn" data-ok>Tamam</button>',
+    onMount(m, close) {
+      m.querySelector('[data-ok]').onclick = async () => {
+        try { await api.patch('/users/@me', { password: m.querySelector('#pw-old').value, new_password: m.querySelector('#pw-new').value }); close(); toast('Şifren değiştirildi', 'ok'); } catch (e) { m.querySelector('#pw-err').textContent = e.message; }
+      };
+    },
   });
 }
 
@@ -2195,17 +2425,12 @@ const USER_PAGES = {
       if (v === null) return;
       try { H.ME_UPDATE(await api.patch('/users/@me', { [k]: v })); ctl.refresh(); toast('Kaydedildi', 'ok'); } catch (e) { fail(e); }
     });
-    el.querySelector('[data-pw]').onclick = () => modal({
-      title: 'Şifreni güncelle', sub: 'Mevcut şifreni ve yeni şifreni gir.',
-      body: '<label class="field"><span>Mevcut Şifre</span><input class="input" type="password" id="pw-old" autocomplete="current-password"></label><label class="field"><span>Yeni Şifre</span><input class="input" type="password" id="pw-new" autocomplete="new-password"></label><div class="form-error" id="pw-err"></div>',
-      foot: '<button class="btn ghost" data-close>İptal</button><button class="btn" data-ok>Tamam</button>',
-      onMount(m, close) {
-        m.querySelector('[data-ok]').onclick = async () => {
-          try { await api.patch('/users/@me', { password: m.querySelector('#pw-old').value, new_password: m.querySelector('#pw-new').value }); close(); toast('Şifren değiştirildi', 'ok'); } catch (e) { m.querySelector('#pw-err').textContent = e.message; }
-        };
-      },
-    });
+    el.querySelector('[data-pw]').onclick = changePasswordModal;
   },
+
+  security: (el, ctl) => security.securityPage(el, ctl),
+  install: (el) => pwa.installPage(el),
+  appearance: (el) => appearancePage(el),
 
   profile(el, ctl) {
     const me = S.me;
@@ -2260,7 +2485,23 @@ const USER_PAGES = {
         <label class="check"><input type="checkbox" id="v-echo" ${store.get('echo', true) ? 'checked' : ''}><div><b>Yankı Giderme</b><small>Hoparlörden gelen sesin mikrofona geri dönmesini engeller</small></div></label>
         <label class="check"><input type="checkbox" id="v-agc" ${store.get('agc', true) ? 'checked' : ''}><div><b>Otomatik Kazanç Kontrolü</b><small>Ses seviyeni otomatik olarak dengeler</small></div></label>
       </div>
+      <h3>Konuşma Modu</h3>
+      <div class="card">
+        <label class="radio-card"><div class="grow"><b>🎤 Ses Etkinliği</b><small>Konuştuğunda mikrofon otomatik açılır</small></div><input type="radio" name="vmode" value="vad" ${voice.mode === 'vad' ? 'checked' : ''}></label>
+        <label class="radio-card"><div class="grow"><b>⌨️ Bas-Konuş</b><small>Yalnızca tuşa basılı tutarken konuşursun</small></div><input type="radio" name="vmode" value="ptt" ${voice.mode === 'ptt' ? 'checked' : ''}></label>
+        <label class="radio-card"><div class="grow"><b>📻 Telsiz Modu</b><small>Bas-konuş + bip sesi, bırakınca "ksst" cızırtısı ve lo-fi telsiz sesi</small></div><input type="radio" name="vmode" value="walkie" ${voice.mode === 'walkie' ? 'checked' : ''}></label>
+        <div class="kv" style="margin-top:12px"><div><small>Bas-Konuş Tuşu</small><b id="v-key">${esc(keyName(voice.pttKey))}</b></div><button class="btn secondary sm" id="v-keyset">Tuşu Değiştir</button></div>
+      </div>
+      <h3>Ses Filtresi</h3>
+      <div class="sb-filters">${Object.entries(VOICE_FILTERS).map(([k, l]) => `<button class="${voice.filter === k ? 'on' : ''}" data-vf="${k}">${l}</button>`).join('')}</div>
       <p class="muted" style="font-size:13px">Not: Mikrofon ve kamera erişimi için site <b>HTTPS</b> üzerinden açılmalıdır (localhost hariç).</p>`;
+    el.querySelectorAll('[name=vmode]').forEach((r) => r.onchange = () => { voice.setMode(r.value); USER_PAGES.voice(el); });
+    el.querySelectorAll('[data-vf]').forEach((b) => b.onclick = () => { voice.setFilter(b.dataset.vf); USER_PAGES.voice(el); });
+    el.querySelector('#v-keyset').onclick = (e) => {
+      e.target.textContent = 'Bir tuşa bas…';
+      const h = (ev) => { ev.preventDefault(); if (ev.code !== 'Escape') voice.setPttKey(ev.code); removeEventListener('keydown', h, true); USER_PAGES.voice(el); };
+      addEventListener('keydown', h, true);
+    };
     let devices = [];
     try { devices = await navigator.mediaDevices.enumerateDevices(); } catch { /* yok */ }
     const fill = (sel, kind, key) => {
@@ -2307,26 +2548,18 @@ const USER_PAGES = {
     };
   },
 
-  appearance(el) {
-    const cur = store.get('theme', 'dark');
-    el.innerHTML = `<h2>Görünüm</h2><h3>Tema</h3><div class="theme-pick">
-      <button data-theme-set="dark" class="${cur === 'dark' ? 'sel' : ''}" style="background:#2a2b30" title="Koyu"></button>
-      <button data-theme-set="light" class="${cur === 'light' ? 'sel' : ''}" style="background:#fff;box-shadow:inset 0 0 0 1px #ccc" title="Açık"></button></div>`;
-    el.addEventListener('click', (e) => {
-      const b = e.target.closest('[data-theme-set]');
-      if (!b) return;
-      store.set('theme', b.dataset.themeSet);
-      document.documentElement.dataset.theme = b.dataset.themeSet;
-      USER_PAGES.appearance(el);
-    });
-  },
-
   notifications(el) {
     const perm = 'Notification' in window ? Notification.permission : 'unsupported';
     el.innerHTML = `<h2>Bildirimler</h2><div class="card">
       <label class="check"><input type="checkbox" id="n-desk" ${store.get('notifications', true) && perm === 'granted' ? 'checked' : ''} ${perm === 'unsupported' ? 'disabled' : ''}>
         <div><b>Masaüstü Bildirimlerini Etkinleştir</b><small>${perm === 'denied' ? 'Tarayıcı izinleri engellendi. Adres çubuğundaki kilit simgesinden izin verebilirsin.' : 'Sekme arka plandayken DM ve bahsetmeler için bildirim alırsın.'}</small></div></label>
-      <label class="check"><input type="checkbox" id="n-sound" ${store.get('sounds', 'on') !== 'off' && localStorage.getItem('bis:sounds') !== 'off' ? 'checked' : ''}><div><b>Sesler</b><small>Mesaj, katılma ve ayrılma sesleri</small></div></label></div>`;
+      <label class="check"><input type="checkbox" id="n-sound" ${store.get('sounds', 'on') !== 'off' && localStorage.getItem('bis:sounds') !== 'off' ? 'checked' : ''}><div><b>Sesler</b><small>Mesaj, katılma ve ayrılma sesleri</small></div></label></div>
+      <h3>Anlık Bildirimler (Uygulama Kapalıyken)</h3>
+      <div class="card"><div class="kv"><div>Biscord kapalıyken bile DM, bahsetme, arkadaşlık isteği ve aramalar telefonuna/bilgisayarına bildirim olarak gelir.</div>
+        <button class="btn ${pwa.pushState() === 'on' ? 'secondary' : ''} sm" id="n-push" ${['denied', 'unsupported'].includes(pwa.pushState()) ? 'disabled' : ''}>${pwa.pushState() === 'on' ? 'Kapat' : 'Aç'}</button></div>
+        ${pwa.pushState() === 'denied' ? '<small class="danger">Bildirim izni engellenmiş. Tarayıcı ayarlarından bu siteye izin ver.</small>' : ''}
+        ${pwa.pushState() === 'unsupported' ? '<small class="muted">Bu tarayıcı desteklemiyor. iPhone\'da önce Ana Ekrana ekle.</small>' : ''}</div>`;
+    el.querySelector('#n-push').onclick = async () => { if (pwa.pushState() === 'on') await pwa.disablePush(); else await pwa.enablePush(); USER_PAGES.notifications(el); };
     el.querySelector('#n-desk').onchange = async (e) => {
       if (e.target.checked && Notification.permission !== 'granted') {
         const r = await Notification.requestPermission();
@@ -2428,7 +2661,8 @@ function openServerSettings(sid, initial = 'overview') {
   if (can(sid, P.MANAGE_SERVER)) pages.push({ id: 'overview', label: 'Genel Görünüm' });
   if (can(sid, P.MANAGE_ROLES)) pages.push({ id: 'roles', label: 'Roller' });
   pages.push({ id: 'members', label: 'Üyeler' });
-  if (can(sid, P.MANAGE_SERVER)) pages.push({ id: 'invites', label: 'Davetler' }, { id: 'bots', label: 'Botlar' });
+  if (can(sid, P.MANAGE_SERVER)) pages.push({ id: 'features', label: 'Özellikler' }, { id: 'automation', label: '🤖 Otomasyon (Bot Yap)' }, { id: 'invites', label: 'Davetler' }, { id: 'bots', label: 'Botlar' });
+  if (can(sid, P.MANAGE_CHANNELS)) pages.push({ id: 'ghosts', label: '👻 Hayalet Kanallar' });
   if (can(sid, P.BAN_MEMBERS)) pages.push({ id: 'bans', label: 'Yasaklamalar' });
   const ctl = openSettingsShell({
     initial: pages.some((p) => p.id === initial) ? initial : pages[0].id,
@@ -2455,6 +2689,42 @@ async function deleteServer(sid, ctl) {
 }
 
 const SERVER_PAGES = {
+  features(sid, el) {
+    const s = server(sid);
+    const row = (k, title, desc) => `<label class="check"><input type="checkbox" data-feat="${k}" ${s[k] ? 'checked' : ''}><div><b>${title}</b><small>${desc}</small></div></label>`;
+    el.innerHTML = `<h2>Özellikler</h2><div class="card">
+      ${row('economy', '🪙 Biscord Coin ve Seviye Sistemi', 'Üyeler mesaj yazdıkça XP ve coin kazanır, mağazadan renkli isim, unvan ve neon parıltı alabilir.')}
+      ${row('activities', '🎮 Mini Oyunlar', 'Kanallarda Bilgi Yarışması, ASCII Yılan ve Arena oynanabilir.')}
+      ${row('watch_party', '📺 Birlikte İzleme', 'Kanallarda YouTube veya video bağlantıları herkes için senkron oynatılabilir.')}</div>
+      ${s.economy ? `<h3>Coin Ver / Al</h3><div class="card"><div class="row wrap"><select class="input grow" id="g-user">${[...s.members.keys()].filter((id) => !user(id)?.is_bot).map((id) => `<option value="${id}">${esc(displayName(id, sid))}</option>`).join('')}</select>
+        <input class="input" type="number" id="g-amt" value="100" style="width:120px"><button class="btn" id="g-go">Uygula</button></div><small class="muted">Eksi değer girersen coin alınır.</small></div>` : ''}`;
+    el.querySelectorAll('[data-feat]').forEach((c) => c.onchange = async () => {
+      try { H.SERVER_UPDATE(await api.patch('/servers/' + sid, { [c.dataset.feat]: c.checked })); toast('Kaydedildi', 'ok'); SERVER_PAGES.features(sid, el); } catch (e) { fail(e); }
+    });
+    el.querySelector('#g-go')?.addEventListener('click', async () => {
+      try { await api.post(`/servers/${sid}/economy/grant`, { user_id: el.querySelector('#g-user').value, amount: +el.querySelector('#g-amt').value }); toast('Coin güncellendi', 'ok'); } catch (e) { fail(e); }
+    });
+  },
+
+  automation: (sid, el) => automationPage(sid, el),
+
+  async ghosts(sid, el) {
+    el.innerHTML = '<h2>👻 Hayalet Kanallar</h2><p class="muted">Yükleniyor…</p>';
+    let list;
+    try { list = await api.get(`/servers/${sid}/ghosts`); } catch (e) { return fail(e); }
+    el.innerHTML = `<h2>👻 Hayalet Kanallar</h2>
+      <p class="muted">Hayalet kanallar listede görünmez. Üyeler bir metin kanalına <code class="inline">/ghost şifre</code> yazarak girer. Mesajlar hiçbir yere kaydedilmez; yalnızca o an içeride olanlara iletilir.</p>
+      <button class="btn" data-new>Yeni Hayalet Kanal</button>
+      <div style="margin-top:14px">${list.map((c) => `<div class="table-row"><span style="font-size:22px">👻</span><div class="meta"><b>${esc(c.name)}</b><small>${c.active ? `${c.active} kişi içeride` : 'Şu an boş'}</small></div>
+        <button class="btn red sm" data-del="${c.id}">Sil</button></div>`).join('') || '<p class="muted">Henüz hayalet kanal yok.</p>'}</div>`;
+    el.querySelector('[data-new]').onclick = () => createChannelModal(sid, null, 'ghost');
+    el.onclick = async (e) => {
+      const d = e.target.closest('[data-del]');
+      if (!d || !(await confirmDialog('Hayalet kanalı sil', 'Bu hayalet kanal silinsin mi? İçerideki herkes çıkarılır.', 'Sil'))) return;
+      try { await api.del(`/servers/${sid}/ghosts/${d.dataset.del}`); SERVER_PAGES.ghosts(sid, el); } catch (err) { fail(err); }
+    };
+  },
+
   overview(sid, el, ctl) {
     const s = server(sid);
     const texts = serverChannels(sid).filter((c) => c.type === 'text');
@@ -2678,7 +2948,42 @@ const A = {
   'show-topic': () => { const c = curChannel(); modal({ title: '#' + esc(c.name), body: `<div class="msg-text">${markdown(c.topic)}</div>` }); },
   'nav-open': () => $('#app')?.classList.add('nav-open'),
   'nav-close': () => $('#app')?.classList.remove('nav-open'),
-  attach: () => $('#file-input')?.click(),
+  attach: (el) => {
+    const ch = curChannel();
+    if (!ch) return;
+    if (ch.type === 'ghost') return toast('Hayalet kanallarda dosya paylaşılamaz', 'error');
+    menuAt(el, [
+      { label: '📎 Dosya Yükle', action: () => $('#file-input')?.click() },
+      { label: '📦 Büyük Dosya (P2P, sınırsız)', action: () => files.startP2P(ch) },
+      '-',
+      { label: '📊 Anket', action: () => pollModal(ch) },
+      { label: '✅ Yapılacaklar Listesi', action: () => todoModal(ch) },
+      { label: '💻 Kod Çalıştırıcı', action: () => sandboxModal(ch) },
+      { label: '🎮 Etkinlik / Oyun', action: () => acts.pickActivity(ch) },
+      { label: clips.clipActive() ? '🎬 Son 30 sn\'yi Kaydet' : '🎬 Klip Modunu Aç', action: () => (clips.clipActive() ? clips.saveClip() : clips.toggleClipMode()) },
+    ], { above: true });
+  },
+  install: () => pwa.promptInstall(),
+  shop: () => shopModal(S.view.sid),
+  'act-start': () => { const c = curChannel(); if (c) acts.pickActivity(c); },
+  soundboard: (el) => soundboardPanel(el),
+  'clip-toggle': () => clips.toggleClipMode(),
+  'clip-save': () => clips.saveClip(),
+  'ghost-leave': async () => {
+    const c = curChannel();
+    if (!c) return;
+    try { await api.post(`/channels/${c.id}/ghost/leave`); } catch (e) { fail(e); }
+  },
+  'poll-vote': (el) => interact(el.dataset.mid, { action: 'vote', option: el.dataset.opt }),
+  'poll-close': (el) => interact(el.dataset.mid, { action: 'close' }),
+  'todo-toggle': (el) => interact(el.dataset.mid, { action: 'toggle', item: el.dataset.item }),
+  'todo-remove': (el) => interact(el.dataset.mid, { action: 'remove', item: el.dataset.item }),
+  'code-run': (el) => runBlock(el),
+  'code-copy': (el) => copy(el.closest('.code-wrap')?.querySelector('code')?.textContent || '', 'Kod kopyalandı'),
+  'preview-3d': (el) => files.preview3D({ url: el.dataset.url, filename: el.dataset.name, size: +el.dataset.size }),
+  'preview-code': (el) => files.previewCode({ url: el.dataset.url, filename: el.dataset.name, size: +el.dataset.size }),
+  'p2p-get': (el) => { const o = (files.p2pOffers.get(S.view.cid) || []).find((x) => x.id === el.dataset.id); if (o) files.acceptOffer(o, el); },
+  'p2p-cancel': (el) => files.cancelOffer(el.dataset.id),
   'composer-emoji': (el) => emojiPicker(el, (e) => {
     const ta = $('#input');
     if (!ta) return;
@@ -2782,5 +3087,18 @@ document.addEventListener('keydown', (e) => {
 
 window.addEventListener('beforeunload', () => voice?.leave());
 window.addEventListener('resize', debounce(() => { if (innerWidth > 760) $('#app')?.classList.remove('nav-open'); }, 150));
+
+// Özellik modüllerinin (public/js/f/*) kullandığı ortak bağlantılar
+Object.assign(ctx, {
+  S, H, api, root, layers, $, $$, esc, icon, avatar, markdown,
+  toast, fail, modal, confirmDialog, promptDialog, menu, menuAt, closeFloating, place, emojiPicker, copy,
+  user, server, member, displayName, nameColor, can, curChannel, serverChannels, upsertUser,
+  navigate, renderGuilds, renderSidebar, renderMain, renderMessages, showProfile, openSettingsShell,
+  showAuth, startApp, changePasswordModal, renderP2P,
+  onLowendChange: () => { if (voice?.connected) voice.startLoop(); renderAll(); },
+  onClipChange: () => { renderVoicePanel(); renderStage(); },
+});
+Object.defineProperty(ctx, 'socket', { get: () => socket });
+Object.defineProperty(ctx, 'voice', { get: () => voice });
 
 boot();

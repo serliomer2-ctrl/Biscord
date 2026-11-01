@@ -15,7 +15,10 @@
     "bcryptjs": "^2.4.3",
     "express": "^4.21.2",
     "multer": "^2.0.2",
+    "nodemailer": "^10.3.1",
+    "qrcode": "^1.5.4",
     "socket.io": "^4.8.1",
-    "socket.io-client": "^4.8.1"
+    "socket.io-client": "^4.8.1",
+    "web-push": "^3.6.7"
   }
 }

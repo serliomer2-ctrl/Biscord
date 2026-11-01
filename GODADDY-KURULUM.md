@@ -27,6 +27,7 @@ Bu kılavuz Biscord'u **GitHub + GoDaddy Node.js Hosting** ile internete açmay�
 - [Bölüm 14 — Güncelleme yayınlama](#bölüm-14--güncelleme-yayınlama)
 - [Bölüm 15 — Sorun giderme](#bölüm-15--sorun-giderme)
 - [Bölüm 16 — Güvenlik kontrol listesi](#bölüm-16--güvenlik-kontrol-listesi)
+- [Bölüm 17 — Sürüm 2 özelliklerinin ayarları](#bölüm-17--sürüm-2-özelliklerinin-ayarları)
 - [Ek A — Zip ile yükleme (GitHub'sız yol)](#ek-a--zip-ile-yükleme-githubsız-yol)
 - [Ek B — Sözlük](#ek-b--sözlük)
 
@@ -769,6 +770,69 @@ Bana şunları gönder:
 - [ ] **Yönetici** rolü yalnızca çok güvendiğin kişilerde
 - [ ] Davet bağlantıları herkese açık bir yerde paylaşılacaksa süre sınırlı (ör. 7 gün)
 - [ ] Bot tokeni sızdıysa: Biscord → Botlarım → **Token Yenile** (eski token anında geçersiz olur)
+- [ ] `admin` hesabının şifresi değiştirildi (Bölüm 17.1)
+- [ ] Yönetici hesabında **Authenticator ile 2FA** açık (Ayarlar → Gizlilik ve Güvenlik)
+- [ ] `SMTP_PASS` ortam değişkeni gizli olarak işaretli
+
+---
+
+## Bölüm 17 — Sürüm 2 özelliklerinin ayarları
+
+### 17.1 İlk yönetici girişi (`admin` / `admin`)
+
+1. Site ilk açıldığında Biscord kendiliğinden bir yönetici hesabı oluşturur.
+2. Giriş ekranında **Kullanıcı Adı:** `admin`, **Şifre:** `admin` yaz.
+3. **"Şifreni değiştir"** ekranı açılır. Mevcut şifre: `admin`. Yeni şifre en az 8 karakter olmalı ve `admin` ile başlamamalı.
+4. Artık sol alttaki profiline tıkla → **Yönetim Paneli**.
+
+> ⚠️ Bunu siteyi yayınladıktan hemen sonra yap. `admin/admin` herkesin tahmin edebileceği bir şifredir; sen değiştirene kadar başkası da deneyebilir.
+>
+> Daha da güvenlisi: GoDaddy ortam değişkenlerine `ADMIN_PASSWORD` = güçlü bir şifre ekle. Hesap ilk açılışta doğrudan bu şifreyle oluşur. Bu değişken **yalnızca hiç yönetici yokken**, yani ilk açılışta etkilidir.
+
+### 17.2 E-posta ayarı (şifre sıfırlama, giriş kodları)
+
+Biscord e-postaları kendi e-posta hesabın üzerinden gönderir. En kolayı **Gmail**:
+
+1. Gmail hesabında **iki adımlı doğrulamayı** aç: myaccount.google.com → **Güvenlik** → **2 Adımlı Doğrulama**.
+2. Aynı sayfada **Uygulama şifreleri**ni aç (arama kutusuna "Uygulama şifreleri" yazabilirsin).
+3. Uygulama adı olarak `Biscord` yaz → **Oluştur**. Google sana **16 haneli** bir şifre gösterir; boşluksuz kopyala.
+4. GoDaddy → **biscord** uygulaması → **Ortam Değişkenleri**:
+
+   | Değişken | Değer |
+   |---|---|
+   | `SMTP_HOST` | `smtp.gmail.com` |
+   | `SMTP_PORT` | `465` |
+   | `SMTP_USER` | `senin.adresin@gmail.com` |
+   | `SMTP_PASS` | 16 haneli uygulama şifresi (gizli olarak işaretle) |
+   | `SMTP_FROM` | `Biscord <senin.adresin@gmail.com>` |
+
+5. Uygulamayı **yeniden başlat**.
+6. Biscord'da **Yönetim Paneli → Duyuru ve Ayarlar → Test Gönder** ile dene.
+
+> GoDaddy'den aldığın bir e-posta adresin varsa (ör. `destek@alanadin.com`), onun SMTP bilgilerini de kullanabilirsin. GoDaddy'nin e-posta panelinde "SMTP sunucusu" ve port bilgisini bulabilirsin.
+
+### 17.3 Telefona ve bilgisayara uygulama olarak kurma
+
+Biscord artık **kurulabilir bir uygulama** (PWA). Kullanıcılar şöyle kurar:
+
+| Cihaz | Nasıl |
+|---|---|
+| **Android** | Siteyi Chrome'da aç → **⋮** → **Uygulamayı yükle** |
+| **iPhone / iPad** | Siteyi Safari'de aç → **Paylaş** → **Ana Ekrana Ekle** |
+| **Windows / Mac** | Siteyi Chrome veya Edge'de aç → adres çubuğundaki **yükle** simgesi |
+
+Biscord'un içindeki sol alt köşede bulunan **⬇ (İndir)** düğmesi de aynı adımları gösterir.
+
+**Google Play veya Microsoft Store'a koymak istersen:** **pwabuilder.com** adresine sitenin adresini yaz. PWABuilder, Biscord'dan ücretsiz olarak Android (APK/AAB) ve Windows (MSIX) paketi oluşturur. Mağazalara yüklemek için ilgili geliştirici hesapları ücretlidir (Google Play bir kerelik ücret alır).
+
+> ⚠️ Uygulama kurulumu ve anlık bildirimler yalnızca **HTTPS** üzerinden çalışır. GoDaddy SSL'i otomatik verdiği için ek bir ayar gerekmez.
+
+### 17.4 Anlık bildirimler
+
+- Kullanıcılar **Ayarlar → Bildirimler → Anlık Bildirimler → Aç** ile açar.
+- Uygulama tamamen kapalıyken bile DM, bahsetme, arkadaşlık isteği ve aramalar bildirim olarak gelir.
+- **iPhone'da** bildirimler yalnızca Biscord **Ana Ekrana eklenip oradan açıldığında** çalışır (iOS 16.4 ve üstü).
+- Bildirim anahtarları ilk açılışta kendiliğinden üretilip veritabanına kaydedilir. Bölüm 9'daki kalıcılık testinde veriler siliniyorsa, anahtarlar her güncellemede değişir ve herkesin bildirimleri yeniden açması gerekir. Bunu önlemek için `.env.example` dosyasındaki `VAPID_*` değişkenlerini ayarla.
 
 ---
 
