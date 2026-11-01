@@ -1,0 +1,63 @@
+// Emoji seçicisi için kategorilere ayrılmış liste (ad = arama anahtarları)
+export const EMOJI_CATEGORIES = [
+  { icon: '😀', name: 'Yüzler', list: [
+    ['😀', 'gülümse smile'], ['😃', 'mutlu happy'], ['😄', 'sevinç'], ['😁', 'sırıt grin'], ['😆', 'kahkaha laugh'], ['😅', 'ter sweat'],
+    ['🤣', 'yerlere yat rofl'], ['😂', 'gözyaşı joy'], ['🙂', 'hafif gülümse'], ['🙃', 'ters upside'], ['😉', 'göz kırp wink'], ['😊', 'utangaç blush'],
+    ['😇', 'melek angel'], ['🥰', 'aşık love'], ['😍', 'kalp göz heart eyes'], ['🤩', 'yıldız star'], ['😘', 'öpücük kiss'], ['😋', 'lezzetli yum'],
+    ['😛', 'dil tongue'], ['😜', 'çılgın crazy'], ['🤪', 'zany'], ['🤑', 'para money'], ['🤗', 'sarıl hug'], ['🤭', 'elle kapat'],
+    ['🤫', 'sus shh'], ['🤔', 'düşün think'], ['🤐', 'ağız kapalı'], ['🤨', 'şüphe raised'], ['😐', 'nötr neutral'], ['😑', 'ifadesiz'],
+    ['😶', 'sessiz'], ['😏', 'sırıtma smirk'], ['😒', 'sıkıl unamused'], ['🙄', 'göz devir roll'], ['😬', 'gergin grimace'], ['😮‍💨', 'nefes'],
+    ['😌', 'rahat relieved'], ['😔', 'üzgün pensive'], ['😪', 'uykulu sleepy'], ['🤤', 'salya drool'], ['😴', 'uyu sleep'], ['😷', 'maske mask'],
+    ['🤒', 'hasta sick'], ['🤕', 'yaralı'], ['🤢', 'mide bulantı nausea'], ['🤮', 'kus vomit'], ['🥵', 'sıcak hot'], ['🥶', 'soğuk cold'],
+    ['🥴', 'sarhoş woozy'], ['😵', 'baş dönme dizzy'], ['🤯', 'beyin patla mind blown'], ['🤠', 'kovboy cowboy'], ['🥳', 'parti party'], ['😎', 'havalı cool'],
+    ['🤓', 'inek nerd'], ['🧐', 'monokl'], ['😕', 'kafası karışık confused'], ['😟', 'endişe worried'], ['🙁', 'somurt'], ['😮', 'şaşır open mouth'],
+    ['😯', 'sessiz şaşır'], ['😲', 'şok astonished'], ['😳', 'kızar flushed'], ['🥺', 'yalvar pleading'], ['😦', 'kaşlar'], ['😧', 'acı'],
+    ['😨', 'kork fearful'], ['😰', 'kaygı anxious'], ['😥', 'üzgün rahat'], ['😢', 'ağla cry'], ['😭', 'hüngür sob'], ['😱', 'çığlık scream'],
+    ['😖', 'karışık'], ['😣', 'azim'], ['😞', 'hayal kırıklığı'], ['😓', 'soğuk ter'], ['😩', 'yorgun weary'], ['😫', 'bitkin tired'],
+    ['🥱', 'esne yawn'], ['😤', 'öfke burun'], ['😡', 'kızgın angry'], ['😠', 'sinirli mad'], ['🤬', 'küfür'], ['😈', 'şeytan devil'],
+    ['💀', 'kafatası skull'], ['💩', 'kaka poop'], ['🤡', 'palyaço clown'], ['👻', 'hayalet ghost'], ['👽', 'uzaylı alien'], ['🤖', 'robot'],
+  ] },
+  { icon: '👋', name: 'İnsanlar', list: [
+    ['👋', 'el salla wave'], ['🤚', 'el'], ['✋', 'dur hand'], ['🖖', 'vulkan'], ['👌', 'tamam ok'], ['🤌', 'italyan'], ['✌️', 'zafer peace'],
+    ['🤞', 'şans fingers crossed'], ['🤟', 'seni seviyorum'], ['🤘', 'rock'], ['🤙', 'ara call'], ['👈', 'sol'], ['👉', 'sağ'], ['👆', 'yukarı'],
+    ['👇', 'aşağı'], ['☝️', 'bir'], ['👍', 'beğen like evet'], ['👎', 'beğenme dislike'], ['✊', 'yumruk'], ['👊', 'yumruk punch'], ['🤛', 'sol yumruk'],
+    ['👏', 'alkış clap'], ['🙌', 'yaşasın raise'], ['👐', 'açık eller'], ['🤲', 'avuç'], ['🤝', 'tokalaş handshake'], ['🙏', 'lütfen pray'], ['✍️', 'yaz'],
+    ['💪', 'güç kas muscle'], ['🧠', 'beyin brain'], ['👀', 'gözler eyes bak'], ['👁️', 'göz'], ['👅', 'dil'], ['👄', 'ağız'], ['🫡', 'selam salute'],
+    ['🙋', 'el kaldır'], ['🤷', 'bilmem shrug'], ['🤦', 'facepalm'], ['🙇', 'eğil'], ['💃', 'dans dance'], ['🕺', 'dansçı'], ['🧑‍💻', 'yazılımcı coder'],
+  ] },
+  { icon: '❤️', name: 'Semboller', list: [
+    ['❤️', 'kalp heart kırmızı'], ['🧡', 'turuncu kalp'], ['💛', 'sarı kalp'], ['💚', 'yeşil kalp'], ['💙', 'mavi kalp'], ['💜', 'mor kalp'],
+    ['🖤', 'siyah kalp'], ['🤍', 'beyaz kalp'], ['🤎', 'kahve kalp'], ['💔', 'kırık kalp broken'], ['❤️‍🔥', 'ateşli kalp'], ['💕', 'iki kalp'],
+    ['💞', 'dönen kalp'], ['💓', 'atan kalp'], ['💗', 'büyüyen kalp'], ['💖', 'parlak kalp'], ['💘', 'ok kalp'], ['💯', 'yüz hundred'],
+    ['💢', 'öfke'], ['💥', 'patlama boom'], ['💫', 'baş dönmesi'], ['💦', 'damla'], ['💨', 'hız dash'], ['💬', 'konuşma balonu'],
+    ['💭', 'düşünce'], ['💤', 'uyku zzz'], ['✅', 'onay check tamam'], ['❌', 'çarpı hayır x'], ['⭕', 'daire'], ['❗', 'ünlem'], ['❓', 'soru'],
+    ['⚠️', 'uyarı warning'], ['🚫', 'yasak'], ['🔥', 'ateş fire'], ['✨', 'parıltı sparkles'], ['⭐', 'yıldız star'], ['🌟', 'parlayan yıldız'],
+    ['⚡', 'şimşek'], ['🎉', 'kutlama tada party'], ['🎊', 'konfeti'], ['🏆', 'kupa trophy'], ['🥇', 'altın madalya'], ['🎯', 'hedef'],
+    ['🆗', 'ok'], ['🆕', 'yeni'], ['🔔', 'zil'], ['🔇', 'sessiz'], ['🔊', 'ses'], ['🎵', 'nota müzik'], ['🎶', 'müzik'],
+  ] },
+  { icon: '🐶', name: 'Doğa', list: [
+    ['🐶', 'köpek dog'], ['🐱', 'kedi cat'], ['🐭', 'fare'], ['🐹', 'hamster'], ['🐰', 'tavşan'], ['🦊', 'tilki fox'], ['🐻', 'ayı bear'],
+    ['🐼', 'panda'], ['🐨', 'koala'], ['🐯', 'kaplan'], ['🦁', 'aslan lion'], ['🐮', 'inek'], ['🐷', 'domuz'], ['🐸', 'kurbağa frog'],
+    ['🐵', 'maymun'], ['🙈', 'görmedim'], ['🙉', 'duymadım'], ['🙊', 'demedim'], ['🐔', 'tavuk'], ['🐧', 'penguen'], ['🐦', 'kuş'],
+    ['🦄', 'tekboynuz unicorn'], ['🐝', 'arı'], ['🦋', 'kelebek'], ['🐢', 'kaplumbağa'], ['🐍', 'yılan'], ['🐙', 'ahtapot'], ['🐬', 'yunus'],
+    ['🐳', 'balina'], ['🌵', 'kaktüs'], ['🌲', 'ağaç'], ['🌸', 'çiçek'], ['🌹', 'gül'], ['🌻', 'ayçiçeği'], ['🍀', 'yonca şans'],
+    ['🍁', 'yaprak'], ['🌍', 'dünya'], ['🌙', 'ay'], ['☀️', 'güneş'], ['⛅', 'bulut'], ['🌈', 'gökkuşağı'], ['❄️', 'kar'], ['🌊', 'dalga'],
+  ] },
+  { icon: '🍕', name: 'Yemek', list: [
+    ['🍏', 'elma'], ['🍎', 'kırmızı elma'], ['🍌', 'muz'], ['🍉', 'karpuz'], ['🍇', 'üzüm'], ['🍓', 'çilek'], ['🍒', 'kiraz'], ['🍑', 'şeftali'],
+    ['🥭', 'mango'], ['🍍', 'ananas'], ['🥥', 'hindistan cevizi'], ['🥑', 'avokado'], ['🍆', 'patlıcan'], ['🌶️', 'biber acı'], ['🌽', 'mısır'],
+    ['🥐', 'kruvasan'], ['🍞', 'ekmek'], ['🧀', 'peynir'], ['🥚', 'yumurta'], ['🍳', 'tava'], ['🥓', 'pastırma'], ['🍔', 'hamburger'],
+    ['🍟', 'patates'], ['🍕', 'pizza'], ['🌭', 'sosisli'], ['🥙', 'döner dürüm'], ['🌮', 'taco'], ['🍝', 'makarna'], ['🍜', 'erişte'],
+    ['🍣', 'suşi'], ['🍦', 'dondurma'], ['🍩', 'donut'], ['🍪', 'kurabiye'], ['🎂', 'pasta doğum günü'], ['🍫', 'çikolata'], ['🍿', 'patlamış mısır'],
+    ['☕', 'kahve çay'], ['🍵', 'çay'], ['🧃', 'meyve suyu'], ['🥤', 'içecek'], ['🍺', 'bira'], ['🍷', 'şarap'], ['🧋', 'bubble tea'],
+  ] },
+  { icon: '⚽', name: 'Etkinlik', list: [
+    ['⚽', 'futbol'], ['🏀', 'basketbol'], ['🏈', 'amerikan futbolu'], ['⚾', 'beyzbol'], ['🎾', 'tenis'], ['🏐', 'voleybol'], ['🎱', 'bilardo'],
+    ['🏓', 'masa tenisi'], ['🥊', 'boks'], ['🎮', 'oyun game'], ['🕹️', 'joystick'], ['🎲', 'zar dice'], ['♟️', 'satranç'], ['🧩', 'yapboz'],
+    ['🎨', 'sanat'], ['🎬', 'film'], ['🎤', 'mikrofon'], ['🎧', 'kulaklık'], ['🎸', 'gitar'], ['🎹', 'piyano'], ['🥁', 'davul'],
+    ['🚗', 'araba'], ['✈️', 'uçak'], ['🚀', 'roket'], ['🏠', 'ev'], ['💻', 'bilgisayar'], ['📱', 'telefon'], ['⌨️', 'klavye'],
+    ['💡', 'fikir ampul'], ['📌', 'iğne pin'], ['📎', 'ataç'], ['🔒', 'kilit'], ['🔑', 'anahtar'], ['💰', 'para torbası'], ['🎁', 'hediye'],
+  ] },
+];
+
+export const QUICK_REACTIONS = ['👍', '❤️', '😂', '🔥', '😮', '😢'];

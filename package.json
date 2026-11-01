@@ -1,0 +1,21 @@
+{
+  "name": "biscord",
+  "version": "1.0.0",
+  "description": "Biscord - kendi sunucunda çalışan gerçek zamanlı sohbet, sesli/görüntülü konuşma ve bot platformu",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "bot": "node bots/example-bot.js"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.21.2",
+    "multer": "^2.0.2",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1"
+  }
+}
