@@ -33,8 +33,37 @@ export const VOICE_FILTERS = {
   chipmunk: '🐿️ Çipmunk',
   deep: '🎚️ Derin Bas',
   megaphone: '📢 Megafon',
-  radio: '📻 Telsiz (lo-fi)',
+  radio: '📻 Telsiz Operatörü',
+  alien: '👽 Retro Uzaylı',
+  bitcrush: '👾 8-bit Robot',
+  npc: '🧙 NPC Sesi',
 };
+
+export const ACOUSTICS = {
+  none: 'Normal oda',
+  cathedral: '⛪ Dev Katedral',
+  underwater: '🌊 Sualtı',
+  parking: '🅿️ Boş Otopark',
+  cave: '🦇 Terk Edilmiş Mağara',
+  bathroom: '🚿 Banyo',
+};
+
+// Oda akustiği için yapay yankı (impulse response) üret
+function makeImpulse(ac, seconds, decay, { dark = 0, early = false } = {}) {
+  const len = Math.floor(ac.sampleRate * seconds);
+  const buf = ac.createBuffer(2, len, ac.sampleRate);
+  for (let ch = 0; ch < 2; ch++) {
+    const d = buf.getChannelData(ch);
+    let lp = 0;
+    for (let i = 0; i < len; i++) {
+      let n = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+      if (dark) { lp += (n - lp) * (1 - dark); n = lp; }
+      d[i] = n;
+    }
+    if (early) for (const ms of [23, 41, 67, 97, 131]) { const i = Math.floor(ac.sampleRate * ms / 1000); if (i < len) d[i] += 0.6 * (ch ? 0.9 : 1); }
+  }
+  return buf;
+}
 
 export class VoiceClient {
   constructor({ socket, meId, iceServers, onChange, onSpeaking, toast }) {
@@ -62,6 +91,13 @@ export class VoiceClient {
     this.g = null;             // ses grafiği düğümleri
     this.timer = null;
     this.joining = false;
+    this.prox = {};            // yakınlık sesi çarpanları (piksel lobi)
+    this.levels = new Map();   // anlık ses seviyeleri (fizik odası)
+    this.acoustic = 'none';
+    this.screamUntil = 0;
+    this.loud = 0;
+    this.getScreamLimit = () => 0; // uygulama ayarlar: 0 = kapalı, 1-100 = eşik
+    this.onScream = () => {};
 
     socket.on('voice:signal', ({ from, data }) => this.onSignal(from, data).catch((e) => console.warn('signal', e)));
     socket.on('voice:force-leave', () => { if (this.channelId) { this.cleanup(); this.toast('Ses bağlantın kesildi'); } });
@@ -107,9 +143,60 @@ export class VoiceClient {
     g.monitor.gain.value = 0.5;
     g.sfx.connect(g.monitor);
     g.monitor.connect(c.destination);
+    // gelen sesler: kişi başı kazanç → dinleme hattı → (akustik) → hoparlör
+    g.listen = c.createGain();
+    g.dry = c.createGain();
+    g.wet = c.createGain();
+    g.verb = c.createConvolver();
+    g.tone = c.createBiquadFilter();
+    g.tone.type = 'lowpass';
+    g.tone.frequency.value = 20000;
+    g.listen.connect(g.tone);
+    g.tone.connect(g.dry).connect(c.destination);
+    g.tone.connect(g.verb).connect(g.wet).connect(c.destination);
     this.g = g;
     this.applyFilter();
+    this.applyAcoustic();
     this.localStream = g.dest.stream;
+    const spk = store.get('speakerId', '');
+    if (spk && c.setSinkId) c.setSinkId(spk).catch(() => {});
+  }
+
+  setAcoustic(name) {
+    this.acoustic = ACOUSTICS[name] ? name : 'none';
+    this.applyAcoustic();
+  }
+
+  applyAcoustic() {
+    const g = this.g;
+    if (!g) return;
+    const c = this.ctx;
+    const a = this.acoustic;
+    const presets = {
+      cathedral: { ir: [4.5, 2.2, { dark: 0.3, early: true }], wet: 0.75, dry: 0.55, tone: 9000 },
+      underwater: { ir: [1.6, 3, { dark: 0.85 }], wet: 0.6, dry: 0.5, tone: 550 },
+      parking: { ir: [2.4, 3.2, { early: true }], wet: 0.6, dry: 0.7, tone: 12000 },
+      cave: { ir: [3.4, 2.6, { dark: 0.6, early: true }], wet: 0.7, dry: 0.5, tone: 4000 },
+      bathroom: { ir: [0.9, 2.5, { early: true }], wet: 0.5, dry: 0.8, tone: 14000 },
+    };
+    const p = presets[a];
+    if (!p) { g.wet.gain.value = 0; g.dry.gain.value = 1; g.tone.frequency.value = 20000; return; }
+    g.verb.buffer = makeImpulse(c, ...p.ir);
+    g.wet.gain.value = p.wet;
+    g.dry.gain.value = p.dry;
+    g.tone.frequency.value = p.tone;
+  }
+
+  setProximity(uid, f) {
+    this.prox[uid] = f;
+    this.updatePeerGain(uid);
+  }
+
+  updatePeerGain(uid) {
+    const p = this.peers.get(uid);
+    if (!p?.gain) return;
+    const v = Math.min(2, (this.volumes[uid] ?? 100) / 100) * (this.prox[uid] ?? 1);
+    p.gain.gain.setTargetAtTime(this.deafened ? 0 : v, this.ctx.currentTime, 0.08);
   }
 
   attachMic(stream) {
@@ -163,6 +250,33 @@ export class VoiceClient {
     else if (f === 'deep') chain(pitch(0.68), biquad('lowshelf', 220, 0.7, 9));
     else if (f === 'megaphone') chain(biquad('highpass', 600), biquad('lowpass', 3200), shaper(25), (() => { const gg = c.createGain(); gg.gain.value = 0.7; return gg; })());
     else if (f === 'radio') chain(biquad('bandpass', 1500, 1.4), shaper(8), (() => { const gg = c.createGain(); gg.gain.value = 1.6; return gg; })());
+    else if (f === 'alien') {
+      const ring = c.createGain();
+      ring.gain.value = 0.4;
+      const osc = c.createOscillator();
+      osc.frequency.value = 420;
+      const depth = c.createGain();
+      depth.gain.value = 0.6;
+      osc.connect(depth).connect(ring.gain);
+      osc.start();
+      g.fx.push(osc);
+      const lfo = c.createOscillator();
+      lfo.frequency.value = 5;
+      const lg = c.createGain();
+      lg.gain.value = 300;
+      const bp = biquad('bandpass', 1200, 2);
+      lfo.connect(lg).connect(bp.frequency);
+      lfo.start();
+      g.fx.push(lfo);
+      chain(pitch(1.35), ring, bp, (() => { const gg = c.createGain(); gg.gain.value = 2.2; return gg; })());
+    } else if (f === 'bitcrush') {
+      const ws = c.createWaveShaper();
+      const steps = 6;
+      const curve = new Float32Array(2048);
+      for (let i = 0; i < 2048; i++) { const x = (i / 1024) - 1; curve[i] = Math.round(x * steps) / steps; }
+      ws.curve = curve;
+      chain(biquad('lowpass', 3500), ws, biquad('highpass', 250), (() => { const gg = c.createGain(); gg.gain.value = 0.8; return gg; })());
+    } else if (f === 'npc') chain(pitch(0.88), biquad('bandpass', 1100, 0.9), shaper(4), (() => { const gg = c.createGain(); gg.gain.value = 1.8; return gg; })());
     else g.filterIn.connect(g.filterOut);
   }
 
@@ -365,13 +479,17 @@ export class VoiceClient {
           peer.audio.style.display = 'none';
           document.body.appendChild(peer.audio);
         }
+        // Chrome, uzak sesin WebAudio'ya akması için bir <audio> öğesine bağlı olmasını ister; ses WebAudio'dan çalınır
         peer.audio.srcObject = stream;
-        peer.audio.muted = this.deafened;
-        peer.audio.volume = Math.min(1, (this.volumes[uid] ?? 100) / 100);
-        const spk = store.get('speakerId', '');
-        if (spk && peer.audio.setSinkId) peer.audio.setSinkId(spk).catch(() => {});
+        peer.audio.muted = true;
         peer.audio.play().catch(() => {});
-        this.monitor(uid, stream);
+        if (peer.src) { try { peer.src.disconnect(); } catch { /* yok */ } }
+        peer.src = this.ctx.createMediaStreamSource(stream);
+        peer.gain ||= this.ctx.createGain();
+        peer.src.connect(peer.gain);
+        peer.gain.connect(this.g.listen);
+        this.updatePeerGain(uid);
+        this.monitor(uid, null, peer.src);
       } else {
         peer.videoStream = new MediaStream([track]);
         track.onunmute = () => this.onChange();
@@ -387,6 +505,8 @@ export class VoiceClient {
     if (!p) return;
     p.pc.close();
     if (p.audio) { p.audio.srcObject = null; p.audio.remove(); }
+    try { p.src?.disconnect(); p.gain?.disconnect(); } catch { /* yok */ }
+    this.levels.delete(uid);
     const a = this.analysers.get(uid);
     if (a) { try { a.src.disconnect(); } catch { /* yok */ } this.analysers.delete(uid); }
     this.speaking.delete(uid);
@@ -458,6 +578,8 @@ export class VoiceClient {
         let sum = 0;
         for (const v of a.buf) { const x = (v - 128) / 128; sum += x * x; }
         const rms = Math.sqrt(sum / a.buf.length);
+        this.levels.set(uid, rms);
+        if (uid === this.meId) this.checkScream(rms, interval);
         if (rms > th) a.hold = 3; else if (a.hold > 0) a.hold--;
         const now = a.hold > 0;
         if (now !== this.speaking.has(uid)) {
@@ -466,6 +588,31 @@ export class VoiceClient {
         }
       }
     }, interval);
+  }
+
+  // Çığlık ölçer: kanal eşiği aşılırsa kendini 30 saniyeliğine "uzaya fırlat" (sustur + sağırlaştır)
+  checkScream(rms, interval) {
+    const limit = this.getScreamLimit();
+    if (!limit || Date.now() < this.screamUntil) return;
+    const threshold = 0.08 + (limit / 100) * 0.5;
+    this.loud = rms > threshold ? this.loud + interval : 0;
+    if (this.loud < 350) return;
+    this.loud = 0;
+    this.screamUntil = Date.now() + 30000;
+    const was = { muted: this.muted, deafened: this.deafened };
+    this.muted = true;
+    this.deafened = true;
+    this.applyMute();
+    this.socket.emit('scream');
+    this.onScream(true);
+    this.onChange();
+    setTimeout(() => {
+      this.muted = was.muted;
+      this.deafened = was.deafened;
+      this.applyMute();
+      this.onScream(false);
+      this.onChange();
+    }, 30000);
   }
 
   // ---------------------------------------------------------------- kontroller
@@ -480,13 +627,13 @@ export class VoiceClient {
       this.g.gate.gain.setTargetAtTime(this.isMicOff() ? 0 : 1, t, 0.01);
       this.g.out.gain.setTargetAtTime(this.serverMuted || !this.canSpeak ? 0 : 1, t, 0.01);
     }
-    for (const p of this.peers.values()) if (p.audio) p.audio.muted = this.deafened;
+    for (const uid of this.peers.keys()) this.updatePeerGain(uid);
     if (this.channelId) this.sendState();
   }
 
   sendState() {
     this.socket.emit('voice:update', {
-      self_mute: this.muted || !this.rawMic || !this.canSpeak,
+      self_mute: this.muted || !this.rawMic || !this.canSpeak || (this.mode !== 'vad' && !this.pttActive),
       self_deaf: this.deafened,
       self_video: this.videoKind === 'camera',
       self_stream: this.videoKind === 'screen',
@@ -512,8 +659,12 @@ export class VoiceClient {
   setVolume(uid, v) {
     this.volumes[uid] = v;
     store.set('volumes', this.volumes);
-    const p = this.peers.get(uid);
-    if (p?.audio) p.audio.volume = Math.min(1, v / 100);
+    this.updatePeerGain(uid);
+  }
+
+  setSpeaker(id) {
+    store.set('speakerId', id);
+    this.ctx?.setSinkId?.(id || '').catch(() => {});
   }
 
   async toggleCamera() {

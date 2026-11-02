@@ -11,7 +11,23 @@ export const GAMES = {
 
 let mounted = null; // { cid, type, comp, host }
 
+// Diğer modüller (collab.js, lobby.js) kendi etkinliklerini buraya ekler
+export function registerActivity(type, meta, factory) {
+  if (meta) GAMES[type] = meta;
+  COMPONENTS[type] = factory;
+}
+export const mountedActivity = () => mounted;
+export const sendInput = (data) => mounted && ctx.socket.emit('act:input', { channel_id: mounted.cid, data });
+
+// Katılırken sunucunun ilk durumu, arayüz kurulmadan gelebilir; son durumu saklayıp kurulumda uygularız
+const lastState = new Map();
+
 export function initActivities(socket) {
+  socket.on('act:state', (d) => { if (d.ended) lastState.delete(d.channel_id); else lastState.set(d.channel_id, d); });
+  socket.on('act:op', (d) => {
+    if (!mounted || mounted.cid !== d.channel_id) return;
+    try { mounted.comp.op?.(d.op); } catch (e) { console.error('etkinlik işlemi', e); }
+  });
   socket.on('act:state', (d) => {
     if (!mounted || mounted.cid !== d.channel_id) return;
     if (d.ended) {
@@ -29,11 +45,11 @@ export function initActivities(socket) {
 
 const emit = (ev, data) => new Promise((r) => ctx.socket.emit(ev, data, r));
 
-export function pickActivity(ch) {
+export function pickActivity(ch, only) {
   const { el, close } = ctx.modal({
     title: '🎮 Etkinlik Başlat', wide: true,
     sub: 'Kanaldaki herkes katılabilir ya da izleyebilir.',
-    body: `<div class="act-pick">${Object.entries(GAMES).map(([k, g]) => `<button class="act-card" data-t="${k}"><div class="ac-emoji">${g.emoji}</div><b>${g.name}</b><small>${g.desc}</small><span class="pill">${g.players}</span></button>`).join('')}</div>`,
+    body: `<div class="act-pick">${Object.entries(GAMES).filter(([k, g]) => !g.hidden && (!only || only.includes(k))).map(([k, g]) => `<button class="act-card" data-t="${k}"><div class="ac-emoji">${g.emoji}</div><b>${g.name}</b><small>${g.desc}</small><span class="pill">${g.players}</span></button>`).join('')}</div>`,
   });
   el.addEventListener('click', async (e) => {
     const b = e.target.closest('[data-t]');
@@ -75,6 +91,7 @@ export function renderActivityArea() {
   if (mounted && mounted.cid !== cid) { ctx.socket.emit('act:leave', { channel_id: mounted.cid }); unmount(); }
   if (!area) return;
   const act = ctx.S.activities.get(cid);
+  if (act?.type === 'lobby') return; // lobi kendi görünümünü yönetir
   if (mounted && mounted.cid === cid) {
     if (!act) { unmount(); area.innerHTML = ''; } else drawHead();
     return;
@@ -90,6 +107,16 @@ export function renderActivityArea() {
   area.querySelector('[data-act-watch]')?.addEventListener('click', () => joinActivity(cid, false));
 }
 
+export async function startOrJoin(cid, type) {
+  if (!ctx.S.activities.has(cid)) {
+    const r = await emit('act:start', { channel_id: cid, type });
+    if (r?.ok) { ctx.S.activities.set(cid, r.activity); mount(cid, type, r.activity.host); return true; }
+    if (!/zaten/.test(r?.error || '')) { ctx.toast(r?.error || 'Başlatılamadı', 'error'); return false; }
+  }
+  await joinActivity(cid, true);
+  return true;
+}
+
 function mount(cid, type, host) {
   const area = document.querySelector('#activity-area');
   if (!area || ctx.S.view.cid !== cid) return;
@@ -98,6 +125,11 @@ function mount(cid, type, host) {
   area.innerHTML = `<div class="activity act-${type}"><div class="act-head" id="act-head"></div><div class="act-body" id="act-body"></div></div>`;
   const body = area.querySelector('#act-body');
   mounted = { cid, type, host, comp: COMPONENTS[type](body, (data) => ctx.socket.emit('act:input', { channel_id: cid, data })) };
+  const early = lastState.get(cid);
+  if (early?.state && early.type === type) {
+    mounted.host = early.host;
+    try { mounted.comp.update(early.state); } catch (e) { console.error('etkinlik çizimi', e); }
+  }
   drawHead();
 }
 

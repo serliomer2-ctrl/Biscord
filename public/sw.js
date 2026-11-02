@@ -1,6 +1,6 @@
 // Biscord service worker: uygulama kabuğunu önbelleğe alır, anlık bildirimleri gösterir
-const CACHE = 'biscord-v2';
-const SHELL = ['/', '/css/app.css', '/css/v2.css', '/js/app.js', '/js/util.js', '/js/api.js', '/js/voice.js', '/js/emoji.js', '/js/ctx.js', '/favicon.svg', '/icons/icon-192.png', '/manifest.webmanifest'];
+const CACHE = 'biscord-v3';
+const SHELL = ['/', '/css/app.css', '/css/v2.css', '/css/v3.css', '/js/app.js', '/js/util.js', '/js/api.js', '/js/voice.js', '/js/emoji.js', '/js/ctx.js', '/favicon.svg', '/icons/icon-192.png', '/manifest.webmanifest'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).catch(() => {}));

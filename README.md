@@ -26,23 +26,39 @@ Kendi sunucunda çalışan, gerçek zamanlı sohbet + sesli/görüntülü konuş
 | **Gizlilik** | 👻 Hayalet kanallar: listede görünmez, şifreyle açılır, mesajlar hiçbir yere kaydedilmez |
 | **Dosyalar** | Sınırsız boyutta doğrudan (P2P) dosya aktarımı, 3D model (.stl/.obj) ve kod dosyası önizleme |
 | **Kişiselleştirme** | Tema motoru (vurgu rengi, arka plan resmi, cam/bulanıklık, yazı tipi, neon, özel CSS), hazır temalar, ⚡ Ultra Hafif Mod, sayaçlı özel durum (Rich Presence) |
-| **Diğer** | Masaüstü bildirimleri, sesler, koyu/açık tema, Ctrl+K hızlı geçiş, mobil uyumlu |
+| **Diğer** | Masaüstü bildirimleri, sesler, koyu/açık tema, Ctrl+K hızlı geçiş, mobil uyumlu, hesap silme |
 
-### İlk yönetici girişi
+### Sürüm 3 — Eğlence paketi
 
-Sunucu ilk kez çalıştığında bir yönetici hesabı oluşturur:
+| Alan | Özellikler |
+|---|---|
+| **Ortak Etkinlikler** | 🎨 Çizim Tahtası (herkes aynı anda çizer, PNG kaydet), 🖥️ Sanal Masaüstü (Win95/XP/Cyberpunk; not, resim, kısayol, hesap makinesi, saat…), 👨‍💻 Ortak Kod (Google Docs gibi canlı imleçler + ortak terminal), 🥁 Beat Yapıcı (16 adımlı sıralayıcı, senkron çalar), 💻 Hacker Düellosu |
+| **Piksel Lobi** | 8-bit karakterlerle dolaşılan oda kanalı; yaklaştıkça ses açılır, uzaklaştıkça kısılır; masaya oturunca ortak ekran |
+| **Sesli Kanal** | Oda akustiği (Katedral, Sualtı, Otopark, Mağara, Banyo), yeni karakter sesleri (Uzaylı, 8-bit, NPC, Telsiz Operatörü), 📢 Çığlık Ölçer (bağıran 30 sn uzaya fırlatılır), 🏀 Ses Fizik Odası |
+| **Mesaj Efektleri** | `/glitch`, `/matrix`, `/hype` (herkesin ekranı sarsılır + konfeti), 💣 kendini imha eden mesajlar (5 sn / 10 sn / okununca, "puf" efektiyle), 🔐 şifreli mesaj (Mors/İkili/Runik/Emoji; AES ile), %1 şansla 🌟 Altın / 🌈 Gökkuşağı / 💎 Holografik nadir mesajlar, 🏎️ WPM nitro, `/gravity`, `/shake` |
+| **Sosyal Oyunlar** | 🐉 Boss savaşı (mesaj/tepki/`/saldir` hasar verir, ödül coin + rozet), 🐱 sunucu maskotu (Tamagotchi), 🎲 Rus ruleti, 🕵️ anonim itiraf kanalı, 🤖 Doodle Bot (16x16 piksel karakter + komut) |
+| **Araçlar** | 📰 "Sen yokken neler oldu?" özetleyici (son 1000 mesaj, yerel), 📡 Arkadaş radarı (tahmini ping), 🖼️ Oyun içi mini sohbet (her zaman üstte pencere, Numpad kontrol) |
+| **Modlar** | >_ Terminal modu + tam klavye gezinme (F1), 🪞 Aynalı Evren, 🙈 Panik tuşu (F12 / Alt+Q → sahte Excel, Vikipedi veya C++ derleyici), 🖱️ İmleç İstilası (Alt+tık lazer), 🫧 Mesaj balonu patlatma, 📺 sessizlikte bozulan ekran |
+| **Profil** | Glitch / Neon / Alev / Gökkuşağı / Matrix avatar çerçeveleri, CRT tarama çizgileri, profil açılınca çalan 8-bit müzik, rozet ve nadir mesaj koleksiyonu |
 
-- **Kullanıcı adı:** `admin`
-- **Şifre:** `admin`
+### Yönetici hesabı
 
-İlk girişte **yeni bir şifre belirlemek zorunludur**; değiştirilmeden hiçbir yere erişilemez. Yönetim Paneli'ne sol alttaki profil → **Yönetim Paneli** ya da Ayarlar → **🛡️ Yönetim Paneli** ile ulaşılır.
+Sunucu ilk çalıştığında `ADMIN_USERNAME` adıyla (varsayılan **Adminolmakben**) bir yönetici hesabı oluşturur.
+- Görünen ad tam olarak `Adminolmakben`; giriş yaparken büyük/küçük harf fark etmez.
+- **Şifre koda yazılmaz.** `ADMIN_PASSWORD` ortam değişkeninden (yerelde `.env` dosyasından, GoDaddy'de Ortam Değişkenleri'nden) okunur.
+- `ADMIN_PASSWORD` verilmezse geçici `admin` şifresi oluşur ve ilk girişte değiştirmek zorunludur.
+
+Yönetim Paneli'ne sol alttaki profil → **Yönetim Paneli** ile ulaşılır. E-posta kurulumu için: [BREVO-KURULUM.md](BREVO-KURULUM.md)
 
 ### Yeni `/` komutları
 
-`/anket`, `/yapilacaklar`, `/oyun`, `/izle <bağlantı>`, `/kod`, `/gunluk`, `/bakiye`, `/magaza`, `/siralama`, `/ghost <şifre>`, `/durum`
+`/anket`, `/yapilacaklar`, `/oyun`, `/izle <bağlantı>`, `/kod`, `/gunluk`, `/bakiye`, `/magaza`, `/siralama`, `/ghost <şifre>`, `/durum`,
+`/glitch`, `/matrix`, `/hype`, `/imha <sn|oku> <mesaj>`, `/sifreli`, `/rulet <soru>`, `/gravity [0]`, `/shake`, `/duzelt`, `/boss`, `/saldir`, `/ozet`, `/radar`, `/doodle`, `/maskot`, `/balon`, `/terminal`, `/hud`
 
 ### Bilinmesi gerekenler
 
+- **Oyun içi HUD:** Tarayıcılar tam ekran (exclusive) oyunların üstüne çizim yapamaz. Mini sohbet, pencereli/kenarlıksız modda üstte kalan bir pencere olarak çalışır (Chrome/Edge 116+).
+- **Özetleyici ve ses karakterleri** yapay zekâ değildir: özet istatistikle, sesler gerçek zamanlı ses efektleriyle (DSP) üretilir; hiçbir veri dışarı gönderilmez.
 - **SMS doğrulama yok:** Ücretsiz bir SMS sağlayıcısı bulunmadığı için eklenmedi. Onun yerine ücretsiz ve daha güvenli olan Authenticator uygulaması desteği var.
 - **E-posta özellikleri** için `.env` dosyasında SMTP ayarları gerekir (bkz. `.env.example`). Ayarlanmazsa kodlar sunucu kayıtlarına yazılır.
 - **Klipler** MP4 veya WebM olarak kaydedilir (tarayıcıda GIF dönüştürme çok ağır olduğu için yok).

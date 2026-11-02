@@ -173,6 +173,8 @@ module.exports = (ctx) => {
       email: u.email, email_verified: !!u.email_verified, email_2fa: !!u.email_2fa, totp_enabled: !!u.totp_enabled,
       backup_codes_left: JSON.parse(u.backup_codes || '[]').length, mail_configured: ctx.mail.configured,
       sessions: q.get('SELECT COUNT(*) AS n FROM sessions WHERE user_id=?', u.id).n,
+      owned_servers: q.get('SELECT COUNT(*) AS n FROM servers WHERE owner_id=?', u.id).n,
+      mail_provider: ctx.mail.provider,
     });
   });
 
@@ -241,6 +243,18 @@ module.exports = (ctx) => {
     await checkPassword(req.user, req.body.password);
     if (!req.user.totp_enabled) fail(400, 'Önce Authenticator ile doğrulamayı aç');
     res.json({ backup_codes: newBackupCodes(req.user.id) });
+  }));
+
+  // Hesabı kalıcı olarak sil
+  api.delete('/users/@me', auth, humanOnly, ah(async (req, res) => {
+    const u = req.user;
+    await checkPassword(u, req.body.password);
+    if (u.totp_enabled && !totp.verify(u.totp_secret, req.body.code)) fail(400, 'Authenticator kodu hatalı');
+    if (u.is_admin && q.get('SELECT COUNT(*) AS n FROM users WHERE is_admin=1').n <= 1) fail(400, 'Sitedeki tek yönetici sensin; önce başka birini yönetici yap');
+    if (String(req.body.confirm || '').toLowerCase() !== u.username) fail(400, 'Onay için kullanıcı adını doğru yaz');
+    ctx.audit(u.id, 'user.self_delete', u.id, { username: u.username });
+    ctx.deleteAccount(u.id);
+    res.json({ ok: true });
   }));
 
   api.post('/users/@me/sessions/logout-others', auth, (req, res) => {

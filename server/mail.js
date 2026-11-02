@@ -1,8 +1,14 @@
 'use strict';
-// E-posta gönderimi (SMTP). Ayarlar yoksa kodlar sunucu kayıtlarına yazılır.
+// E-posta gönderimi: önce Brevo API (BREVO_API_KEY), yoksa SMTP. Hiçbiri yoksa kodlar sunucu kayıtlarına yazılır.
 const nodemailer = require('nodemailer');
 
+function parseFrom(s) {
+  const m = /^\s*(.*?)\s*<([^>]+)>\s*$/.exec(s || '');
+  return m ? { name: m[1].replace(/^"|"$/g, '') || 'Biscord', email: m[2] } : { name: 'Biscord', email: (s || '').trim() };
+}
+
 module.exports = (ctx) => {
+  const brevoKey = process.env.BREVO_API_KEY;
   const host = process.env.SMTP_HOST;
   const port = Number(process.env.SMTP_PORT) || 587;
   const transport = host ? nodemailer.createTransport({
@@ -11,7 +17,19 @@ module.exports = (ctx) => {
     secure: port === 465,
     auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS || '' } : undefined,
   }) : null;
-  const from = process.env.SMTP_FROM || (process.env.SMTP_USER ? `Biscord <${process.env.SMTP_USER}>` : 'Biscord <no-reply@biscord.local>');
+  const from = process.env.MAIL_FROM || process.env.SMTP_FROM || (process.env.SMTP_USER ? `Biscord <${process.env.SMTP_USER}>` : 'Biscord <no-reply@biscord.local>');
+
+  async function sendBrevo(to, subject, text, html) {
+    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: { 'api-key': brevoKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ sender: parseFrom(from), to: [{ email: to }], subject, textContent: text, htmlContent: html || undefined }),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`Brevo ${res.status}: ${body.slice(0, 200)}`);
+    }
+  }
 
   const PURPOSE = {
     verify: { subject: 'E-posta adresini doğrula', line: 'Biscord hesabına bu e-posta adresini eklemek için doğrulama kodun:' },
@@ -20,6 +38,7 @@ module.exports = (ctx) => {
   };
 
   async function send(to, subject, text, html) {
+    if (brevoKey) { await sendBrevo(to, subject, text, html); return true; }
     if (!transport) {
       console.log(`\n[E-POSTA — SMTP ayarlı değil] Alıcı: ${to}\nKonu: ${subject}\n${text}\n`);
       return false;
@@ -46,11 +65,18 @@ module.exports = (ctx) => {
   }
 
   ctx.mail = {
-    configured: !!transport,
+    configured: !!(brevoKey || transport),
+    provider: brevoKey ? 'Brevo API' : transport ? 'SMTP' : null,
     send,
     sendCode,
     async verify() {
-      if (!transport) return { ok: false, error: 'SMTP ayarlanmamış' };
+      if (brevoKey) {
+        try {
+          const r = await fetch('https://api.brevo.com/v3/account', { headers: { 'api-key': brevoKey, Accept: 'application/json' } });
+          return r.ok ? { ok: true } : { ok: false, error: `Brevo API anahtarı geçersiz (${r.status})` };
+        } catch (e) { return { ok: false, error: e.message }; }
+      }
+      if (!transport) return { ok: false, error: 'E-posta ayarlanmamış (BREVO_API_KEY veya SMTP_HOST)' };
       try { await transport.verify(); return { ok: true }; } catch (e) { return { ok: false, error: e.message }; }
     },
   };

@@ -187,10 +187,32 @@ export async function securityPage(el, ctl) {
         <button class="btn secondary sm" disabled>Yakında</button></div>
     </div>
     <h3>Oturumlar</h3>
-    <div class="card"><div class="kv"><div>Bu hesapta <b>${s.sessions}</b> açık oturum var.</div><button class="btn secondary sm" data-others>Diğer cihazlardan çıkış yap</button></div></div>`;
+    <div class="card"><div class="kv"><div>Bu hesapta <b>${s.sessions}</b> açık oturum var.</div><button class="btn secondary sm" data-others>Diğer cihazlardan çıkış yap</button></div></div>
+    <h3 class="danger">Tehlikeli Bölge</h3>
+    <div class="card danger-zone"><div class="kv"><div><b>Hesabı Kalıcı Olarak Sil</b>
+      <small class="muted" style="display:block;text-transform:none;font-weight:400">Profilin, mesajların, botların${s.owned_servers ? ` ve sahibi olduğun <b>${s.owned_servers}</b> sunucu` : ''} kalıcı olarak silinir. Bu işlem geri alınamaz.</small></div>
+      <button class="btn red sm" data-delete-acc>Hesabı Sil</button></div></div>`;
 
   const q = (sel) => el.querySelector(sel);
   q('[data-pw]').onclick = () => ctx.changePasswordModal();
+  q('[data-delete-acc]').onclick = () => ctx.modal({
+    title: '⚠️ Hesabını kalıcı olarak sil',
+    sub: `Bu işlem <b>geri alınamaz</b>. Mesajların, botların${s.owned_servers ? `, sahibi olduğun ${s.owned_servers} sunucu ve içindeki her şey` : ''} silinecek.`,
+    body: `<label class="field"><span>Onay için kullanıcı adını yaz: <b>${esc(ctx.S.me.username)}</b></span><input class="input" id="da-confirm" autocomplete="off"></label>
+      <label class="field"><span>Şifre</span><input class="input" type="password" id="da-pw" autocomplete="current-password"></label>
+      ${s.totp_enabled ? '<label class="field"><span>Authenticator kodu</span><input class="input" id="da-code" inputmode="numeric" maxlength="6"></label>' : ''}
+      <div class="form-error" id="da-err"></div>`,
+    foot: '<button class="btn ghost" data-close>Vazgeç</button><button class="btn red" data-ok>Hesabımı Kalıcı Olarak Sil</button>',
+    onMount(m) {
+      m.querySelector('[data-ok]').onclick = async () => {
+        try {
+          await api.del('/users/@me', { confirm: m.querySelector('#da-confirm').value.trim(), password: m.querySelector('#da-pw').value, code: m.querySelector('#da-code')?.value });
+          api.setToken(null);
+          location.href = '/';
+        } catch (e) { m.querySelector('#da-err').textContent = e.message; }
+      };
+    },
+  });
   q('[data-others]').onclick = async () => { try { await api.post('/users/@me/sessions/logout-others'); ctx.toast('Diğer oturumlar kapatıldı', 'ok'); refresh(); } catch (e) { ctx.fail(e); } };
 
   const verifyFlow = async () => {

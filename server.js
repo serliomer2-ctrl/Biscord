@@ -33,7 +33,7 @@ const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 1e6, pingInterval: 20000 });
 
 // Özellik modüllerinin bağlandığı kancalar (server/ klasörü)
-const hooks = { message: [], memberJoin: [], socket: [], ready: [] };
+const hooks = { message: [], memberJoin: [], socket: [], ready: [], reaction: [] };
 const runHooks = (name, ...args) => {
   for (const fn of hooks[name]) {
     try { fn(...args); } catch (e) { console.error(`[kanca:${name}]`, e); }
@@ -41,7 +41,8 @@ const runHooks = (name, ...args) => {
 };
 const voice = new Map(); // userId -> ses durumu
 const ghostAccess = new Map(); // hayalet kanal id -> Set(userId)
-const RESERVED_NAMES = new Set(['admin', 'administrator', 'yonetici', 'biscord', 'system', 'sistem', 'moderator', 'destek', 'support', 'root']);
+const RESERVED_NAMES = new Set(['admin', 'administrator', 'yonetici', 'biscord', 'system', 'sistem', 'moderator', 'destek', 'support', 'root',
+  (process.env.ADMIN_USERNAME || 'Adminolmakben').trim().toLowerCase()]);
 
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
@@ -118,7 +119,14 @@ function publicUser(u) {
     created_at: u.created_at,
     status: presenceOf(u),
     presence: parsePresence(u.presence),
+    profile_fx: safeJson(u.profile_fx, null),
+    rare: safeJson(u.rare_collection, {}),
   };
+}
+
+function safeJson(s, d) {
+  if (!s) return d;
+  try { return JSON.parse(s); } catch { return d; }
 }
 
 function parsePresence(raw) {
@@ -220,6 +228,9 @@ function memberExtras(m) {
     title: m.title && (!m.title_until || m.title_until > t) ? m.title : null,
     glow: !!(m.glow_until && m.glow_until > t),
     timeout_until: m.timeout_until && m.timeout_until > t ? m.timeout_until : null,
+    duck_until: m.duck_until && m.duck_until > t ? m.duck_until : null,
+    censor_until: m.censor_until && m.censor_until > t ? m.censor_until : null,
+    badges: (() => { try { return JSON.parse(m.badges || '[]').filter((b) => !b.until || b.until > t); } catch { return []; } })(),
   };
 }
 
@@ -244,7 +255,7 @@ function serverPayload(sid) {
     roleMap.get(r.user_id).push(r.role_id);
   }
   const members = q.all(
-    `SELECT m.nickname, m.joined_at, m.xp, m.coins, m.name_color, m.title, m.title_until, m.glow_until, m.timeout_until, u.*
+    `SELECT m.nickname, m.joined_at, m.xp, m.coins, m.name_color, m.title, m.title_until, m.glow_until, m.timeout_until, m.duck_until, m.censor_until, m.badges, u.*
      FROM members m JOIN users u ON u.id=m.user_id WHERE m.server_id=?`, sid,
   ).map((r) => ({ user: publicUser(r), nickname: r.nickname, joined_at: r.joined_at, roles: roleMap.get(r.id) || [], ...memberExtras(r) }));
   return {
@@ -303,6 +314,8 @@ function messagePayload(m, ch) {
     edited_at: m.edited_at,
     created_at: m.created_at,
     reactions: reactionsOf(m.id),
+    expires_at: m.expires_at || null, // -1 = okununca imha
+    rarity: m.rarity || null,
   };
 }
 
@@ -372,15 +385,15 @@ function extractMentions(ch, content) {
   return q.all(`SELECT u.id FROM users u JOIN dm_participants p ON p.user_id=u.id AND p.channel_id=? WHERE lower(u.username) IN (${ph})`, ch.id, ...names).map((r) => r.id);
 }
 
-function createMessage(ch, authorId, { content = '', type = 0, attachments = [], embeds = [], reply_to = null, components = null } = {}) {
+function createMessage(ch, authorId, { content = '', type = 0, attachments = [], embeds = [], reply_to = null, components = null, expires_at = null, rarity = null } = {}) {
   const id = newId();
   const t = now();
-  const mentions = content ? extractMentions(ch, content) : [];
-  const everyone = !!ch.server_id && /@(everyone|here)\b/.test(content) && has(ch.server_id, authorId, P.MENTION_EVERYONE);
+  const mentions = content && !ch.anon ? extractMentions(ch, content) : [];
+  const everyone = !!ch.server_id && !ch.anon && /@(everyone|here)\b/.test(content) && has(ch.server_id, authorId, P.MENTION_EVERYONE);
   q.run(
-    'INSERT INTO messages(id,channel_id,author_id,content,type,attachments,embeds,components,mentions,mention_everyone,reply_to,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+    'INSERT INTO messages(id,channel_id,author_id,content,type,attachments,embeds,components,mentions,mention_everyone,reply_to,created_at,expires_at,rarity) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
     id, ch.id, authorId, content, type, JSON.stringify(attachments), JSON.stringify(embeds), components ? JSON.stringify(components) : null,
-    JSON.stringify(mentions), everyone ? 1 : 0, reply_to, t,
+    JSON.stringify(mentions), everyone ? 1 : 0, reply_to, t, expires_at, rarity,
   );
   q.run('UPDATE channels SET last_message_id=?, last_message_at=? WHERE id=?', id, t, ch.id);
   q.run(
@@ -820,7 +833,7 @@ api.post('/invites/:code', auth, humanOnly, (req, res) => {
 });
 
 // ---------------------------------------------------------------- kanallar
-const CHANNEL_TYPES = ['text', 'voice', 'category', 'ghost'];
+const CHANNEL_TYPES = ['text', 'voice', 'category', 'ghost', 'lobby'];
 
 api.post('/servers/:sid/channels', auth, ah(async (req, res) => {
   const sid = req.params.sid;
@@ -839,8 +852,8 @@ api.post('/servers/:sid/channels', auth, ah(async (req, res) => {
     ? q.get("SELECT id FROM channels WHERE id=? AND server_id=? AND type='category'", req.body.parent_id, sid) : null;
   const pos = (q.get('SELECT MAX(position) AS p FROM channels WHERE server_id=? AND parent_id IS ?', sid, parent ? parent.id : null).p ?? -1) + 1;
   const id = newId();
-  q.run('INSERT INTO channels(id,server_id,type,name,topic,parent_id,position,password_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?)',
-    id, sid, type, name, clean(req.body.topic, 1024), parent ? parent.id : null, pos, pwHash, now());
+  q.run('INSERT INTO channels(id,server_id,type,name,topic,parent_id,position,password_hash,anon,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+    id, sid, type, name, clean(req.body.topic, 1024), parent ? parent.id : null, pos, pwHash, type === 'text' && req.body.anon ? 1 : 0, now());
   const ch = publicChannel(q.get('SELECT * FROM channels WHERE id=?', id));
   if (type === 'ghost') {
     // hayalet kanallar listede görünmez; yalnızca oluşturan kişiye açılır
@@ -922,6 +935,15 @@ api.post('/channels/:id/messages', auth, upload.array('files', 10), (req, res) =
       if (files.length || components) fail(400, 'Hayalet kanallarda dosya ve etkileşimli mesaj gönderilemez');
       return res.json(ctx.ghostSend(ch, req.user, content));
     }
+    // Kendini imha eden mesaj: saniye ya da "read" (okununca)
+    let expires_at = null;
+    if (req.body.expire === 'read') expires_at = -1;
+    else if (Number(req.body.expire) > 0) expires_at = now() + Math.min(86400, Number(req.body.expire)) * 1000;
+    if (ch.anon) {
+      // Anonim kanal: gerçek yazar hiçbir yerde saklanmaz
+      if (files.length || (components && components.type !== 'fx' && components.type !== 'cipher')) fail(400, 'Anonim kanalda yalnızca metin gönderilebilir');
+      return res.json(createMessage(ch, ctx.anonUserId, { content, embeds: [], components: ctx.anonMask(components), expires_at }));
+    }
     let reply = null;
     if (req.body.reply_to) {
       const r = q.get('SELECT id FROM messages WHERE id=? AND channel_id=?', String(req.body.reply_to), ch.id);
@@ -930,7 +952,7 @@ api.post('/channels/:id/messages', auth, upload.array('files', 10), (req, res) =
     const attachments = files.map((f) => ({
       id: newId(), filename: fixName(f.originalname).slice(0, 200), size: f.size, content_type: f.mimetype, url: '/uploads/' + f.filename,
     }));
-    res.json(createMessage(ch, req.user.id, { content, attachments, embeds, reply_to: reply, components }));
+    res.json(createMessage(ch, req.user.id, { content, attachments, embeds, reply_to: reply, components, expires_at, rarity: ctx.rollRarity(req.user, ch) }));
   } catch (e) { cleanup(); throw e; }
 });
 
@@ -1004,6 +1026,7 @@ api.put('/messages/:id/reactions/:emoji', auth, (req, res) => {
       !q.get('SELECT 1 FROM reactions WHERE message_id=? AND emoji=?', m.id, emoji)) fail(400, 'Bir mesaja en fazla 20 farklı tepki eklenebilir');
   q.run('INSERT OR IGNORE INTO reactions(message_id,user_id,emoji,created_at) VALUES(?,?,?,?)', m.id, req.user.id, emoji, now());
   reactionChanged(m, ch);
+  runHooks('reaction', m, ch, req.user);
   res.json({ ok: true });
 });
 
@@ -1244,8 +1267,11 @@ const ctx = {
   sanitizeComponents: () => null,
   ghostUnlock: () => {},
   ghostSend: () => fail(400, 'Hayalet kanallar devre dışı'),
+  rollRarity: () => null,
+  anonMask: (c) => c,
+  anonUserId: null,
 };
-for (const mod of ['mail', 'security', 'admin', 'push', 'interactive', 'economy', 'ghost', 'soundboard', 'activities', 'p2p', 'automation']) {
+for (const mod of ['mail', 'security', 'admin', 'push', 'interactive', 'economy', 'ghost', 'soundboard', 'activities', 'p2p', 'automation', 'fun']) {
   require('./server/' + mod)(ctx);
 }
 
@@ -1331,7 +1357,7 @@ io.on('connection', (socket) => {
 
   socket.on('voice:join', safe((data) => {
     const ch = channelAccess(uid, String(data?.channel_id));
-    if (ch.type !== 'voice' && ch.type !== 'dm') fail(400, 'Bu bir ses kanalı değil');
+    if (ch.type !== 'voice' && ch.type !== 'dm' && ch.type !== 'lobby') fail(400, 'Bu bir ses kanalı değil');
     if (ch.server_id && !has(ch.server_id, uid, P.CONNECT)) fail(403, 'Bu ses kanalına bağlanma yetkin yok');
     const inChannel = [...voice.values()].filter((v) => v.channel_id === ch.id && v.user_id !== uid);
     if (inChannel.length >= 24) fail(400, 'Ses kanalı dolu (en fazla 25 kişi)');

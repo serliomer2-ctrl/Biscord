@@ -6,17 +6,21 @@ const path = require('path');
 module.exports = (ctx) => {
   const { api, q, io, bcrypt, now, rand, clean, fail, ah, auth, getUser, publicUser, settings, audit, toUser } = ctx;
 
-  // ---------------------------------------------------------------- ilk yönetici hesabı
-  if (!q.get('SELECT 1 FROM users WHERE is_admin=1')) {
-    const name = (process.env.ADMIN_USERNAME || 'admin').toLowerCase();
-    const pw = process.env.ADMIN_PASSWORD || 'admin';
-    if (q.get('SELECT 1 FROM users WHERE username=?', name)) {
-      console.warn(`[yönetici] "${name}" kullanıcı adı başka bir hesapta. ADMIN_USERNAME ile farklı bir ad belirle.`);
-    } else {
+  // ---------------------------------------------------------------- yönetici hesabı
+  // Görünen ad ADMIN_USERNAME ile aynıdır; kullanıcı adı küçük harfle saklanır (giriş büyük/küçük harf duyarsızdır).
+  // Şifre koda yazılmaz: ADMIN_PASSWORD ortam değişkeninden gelir. Verilmezse geçici "admin" şifresi
+  // oluşturulur ve ilk girişte değiştirilmesi zorunlu olur.
+  {
+    const display = (process.env.ADMIN_USERNAME || 'Adminolmakben').trim().slice(0, 32);
+    const name = display.toLowerCase();
+    const pw = process.env.ADMIN_PASSWORD;
+    const ex = q.get('SELECT * FROM users WHERE username=?', name);
+    if (ex && !ex.is_admin) {
+      console.warn(`[yönetici] "${name}" kullanıcı adı normal bir hesapta; yönetici yapılmadı.`);
+    } else if (!ex && (pw || !q.get('SELECT 1 FROM users WHERE is_admin=1'))) {
       q.run('INSERT INTO users(id,username,password_hash,display_name,is_admin,must_change_password,created_at) VALUES(?,?,?,?,1,?,?)',
-        ctx.newId(), name, bcrypt.hashSync(pw, 10), 'Yönetici', process.env.ADMIN_PASSWORD ? 0 : 1, now());
-      console.log(`\n  [yönetici] Hesap oluşturuldu → kullanıcı adı: ${name}  şifre: ${process.env.ADMIN_PASSWORD ? '(ADMIN_PASSWORD)' : 'admin'}`);
-      if (!process.env.ADMIN_PASSWORD) console.log('  İlk girişte şifreyi değiştirmek zorunludur.\n');
+        ctx.newId(), name, bcrypt.hashSync(pw || 'admin', 10), display, pw ? 0 : 1, now());
+      console.log(`\n  [yönetici] "${display}" hesabı oluşturuldu (${pw ? 'şifre: ADMIN_PASSWORD' : 'geçici şifre: admin — ilk girişte değiştirilmeli'})\n`);
     }
   }
 
@@ -159,11 +163,7 @@ module.exports = (ctx) => {
   api.delete('/admin/users/:id', ...requireAdmin, (req, res) => {
     const u = target(req);
     if (u.is_admin) fail(400, 'Önce yönetici yetkisini kaldır');
-    disconnectUser(u.id);
-    for (const s of q.all('SELECT id FROM servers WHERE owner_id=?', u.id)) deleteServer(s.id);
-    for (const r of q.all('SELECT server_id FROM members WHERE user_id=?', u.id)) ctx.removeMember(r.server_id, u.id);
-    for (const b of q.all('SELECT id FROM users WHERE bot_owner_id=?', u.id)) q.run('DELETE FROM users WHERE id=?', b.id);
-    q.run('DELETE FROM users WHERE id=?', u.id);
+    ctx.deleteAccount(u.id);
     audit(req.user.id, 'user.delete', u.id, { username: u.username });
     res.json({ ok: true });
   });
@@ -175,6 +175,15 @@ module.exports = (ctx) => {
     io.in('server:' + sid).socketsLeave('server:' + sid);
     q.run('DELETE FROM servers WHERE id=?', sid);
   }
+
+  // Bir hesabı tüm izleriyle sil (yönetici paneli ve kullanıcının kendi hesap silmesi kullanır)
+  ctx.deleteAccount = (uid) => {
+    disconnectUser(uid);
+    for (const s of q.all('SELECT id FROM servers WHERE owner_id=?', uid)) deleteServer(s.id);
+    for (const r of q.all('SELECT server_id FROM members WHERE user_id=?', uid)) ctx.removeMember(r.server_id, uid);
+    for (const b of q.all('SELECT id FROM users WHERE bot_owner_id=?', uid)) { disconnectUser(b.id); q.run('DELETE FROM users WHERE id=?', b.id); }
+    q.run('DELETE FROM users WHERE id=?', uid);
+  };
 
   api.get('/admin/servers', ...requireAdmin, (req, res) => {
     const s = clean(req.query.q, 64).toLowerCase();

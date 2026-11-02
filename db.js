@@ -245,6 +245,29 @@ CREATE TABLE IF NOT EXISTS automations (
 );
 `);
 
+// ---------------------------------------------------------------- sürüm 3 eklemeleri
+for (const [col, def] of [['profile_fx', 'TEXT'], ['rare_collection', "TEXT DEFAULT '{}'"]]) addColumn('users', col, def);
+for (const [col, def] of [['duck_until', 'INTEGER'], ['censor_until', 'INTEGER'], ['badges', "TEXT DEFAULT '[]'"]]) addColumn('members', col, def);
+addColumn('servers', 'mascot', 'TEXT');
+addColumn('channels', 'anon', 'INTEGER DEFAULT 0');
+addColumn('channels', 'acoustic', "TEXT DEFAULT 'none'");
+addColumn('channels', 'scream_db', 'INTEGER DEFAULT 0');
+addColumn('messages', 'rarity', 'TEXT');
+addColumn('messages', 'expires_at', 'INTEGER');
+db.exec(`
+CREATE TABLE IF NOT EXISTS doodles (
+  id TEXT PRIMARY KEY,
+  server_id TEXT NOT NULL REFERENCES servers(id) ON DELETE CASCADE,
+  user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  pixels TEXT NOT NULL,
+  trigger TEXT NOT NULL,
+  anim TEXT NOT NULL DEFAULT 'jump',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_expires ON messages(expires_at) WHERE expires_at IS NOT NULL;
+`);
+
 const cache = new Map();
 function stmt(sql) {
   let s = cache.get(sql);

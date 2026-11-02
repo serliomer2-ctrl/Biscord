@@ -328,8 +328,276 @@ function watch({ send }) {
   };
 }
 
-const ENGINES = { trivia, snake, arena, watch };
-const NAMES = { trivia: 'Bilgi Yarışması', snake: 'ASCII Yılan', arena: 'Arena', watch: 'Birlikte İzleme' };
+// ---------------------------------------------------------------- Ortak Çizim Tahtası
+const round4 = (n) => Math.round(Math.max(0, Math.min(1, Number(n) || 0)) * 10000) / 10000;
+const COLOR = /^#[0-9a-f]{6}$/i;
+
+function whiteboard({ op, send }) {
+  let strokes = [];
+  return {
+    max: 50,
+    join() { send(); },
+    leave() {},
+    input(uid, d) {
+      if (d?.cmd === 'seg') {
+        op({ cmd: 'seg', uid, id: String(d.id).slice(0, 24), color: COLOR.test(d.color) ? d.color : '#ffffff', size: Math.min(40, Math.max(1, +d.size || 4)), tool: d.tool === 'erase' ? 'erase' : 'pen', pts: (d.pts || []).slice(0, 40).map(([x, y]) => [round4(x), round4(y)]) });
+      } else if (d?.cmd === 'stroke') {
+        const s = d.s || {};
+        const pts = (Array.isArray(s.pts) ? s.pts : []).slice(0, 2000).map(([x, y]) => [round4(x), round4(y)]);
+        const stroke = { id: String(s.id).slice(0, 24), uid, color: COLOR.test(s.color) ? s.color : '#ffffff', size: Math.min(40, Math.max(1, +s.size || 4)), tool: ['pen', 'erase', 'text'].includes(s.tool) ? s.tool : 'pen', pts, text: s.tool === 'text' ? String(s.text || '').slice(0, 120) : undefined };
+        if (!pts.length) return;
+        strokes.push(stroke);
+        if (strokes.length > 3000) strokes = strokes.slice(-3000);
+        op({ cmd: 'stroke', s: stroke });
+      } else if (d?.cmd === 'undo') {
+        const i = strokes.map((s) => s.uid).lastIndexOf(uid);
+        if (i >= 0) { const [s] = strokes.splice(i, 1); op({ cmd: 'remove', id: s.id }); }
+      } else if (d?.cmd === 'clear') {
+        strokes = [];
+        op({ cmd: 'clear', uid });
+      }
+    },
+    snapshot() { return { strokes }; },
+    destroy() {},
+  };
+}
+
+// ---------------------------------------------------------------- Sanal Masaüstü
+function desktop({ op, send }) {
+  const items = new Map();
+  let theme = 'win95';
+  let z = 1;
+  const APPS = ['calc', 'clock', 'notepad', 'music', 'trash'];
+  return {
+    max: 50,
+    join() { send(); },
+    leave() {},
+    input(uid, d) {
+      const it = d?.id && items.get(String(d.id));
+      if (d?.cmd === 'add') {
+        if (items.size >= 80) return;
+        const type = ['note', 'image', 'link', 'app'].includes(d.type) ? d.type : 'note';
+        const url = typeof d.url === 'string' && /^(https:\/\/|\/uploads\/)/.test(d.url) ? d.url.slice(0, 1000) : undefined;
+        if ((type === 'image' || type === 'link') && !url) return;
+        const item = {
+          id: String(d.id || Math.random().toString(36).slice(2)).slice(0, 24), type, by: uid, z: ++z,
+          x: round4(d.x ?? 0.4), y: round4(d.y ?? 0.3),
+          text: String(d.text || '').slice(0, 2000), url, app: APPS.includes(d.app) ? d.app : undefined,
+          color: COLOR.test(d.color) ? d.color : '#fff59d',
+        };
+        items.set(item.id, item);
+        op({ cmd: 'add', item });
+      } else if (d?.cmd === 'move' && it) {
+        it.x = round4(d.x); it.y = round4(d.y); it.z = ++z;
+        op({ cmd: 'move', id: it.id, x: it.x, y: it.y, z: it.z, uid });
+      } else if (d?.cmd === 'edit' && it) {
+        it.text = String(d.text || '').slice(0, 2000);
+        op({ cmd: 'edit', id: it.id, text: it.text, uid });
+      } else if (d?.cmd === 'del' && it) {
+        items.delete(it.id);
+        op({ cmd: 'del', id: it.id });
+      } else if (d?.cmd === 'theme' && ['win95', 'xp', 'cyber'].includes(d.theme)) {
+        theme = d.theme;
+        op({ cmd: 'theme', theme });
+      }
+    },
+    snapshot() { return { theme, items: [...items.values()] }; },
+    destroy() {},
+  };
+}
+
+// ---------------------------------------------------------------- Ortak Kod Editörü (OT: aynı anda yazma)
+// İşlemler: { t:'ins', p, s } ya da { t:'del', p, n }
+// a'yı, b zaten uygulanmış belgeye göre dönüştürür. aFirst: aynı noktaya iki ekleme olursa a önce gelir.
+// Kural: bir silme aralığının İÇİNE düşen ekleme de silinir (iki taraf da aynı sonuca varır).
+function transform(a, b, aFirst = false) {
+  if (!a || !b) return a;
+  if (a.t === 'ins') {
+    if (b.t === 'ins') return b.p < a.p || (b.p === a.p && !aFirst) ? { ...a, p: a.p + b.s.length } : a;
+    if (a.p <= b.p) return a;
+    if (a.p >= b.p + b.n) return { ...a, p: a.p - b.n };
+    return null; // silinen aralığın içine yazılmıştı
+  }
+  if (b.t === 'ins') {
+    if (b.p >= a.p + a.n) return a;
+    if (b.p <= a.p) return { ...a, p: a.p + b.s.length };
+    return { ...a, n: a.n + b.s.length }; // araya eklenen metin de silinir
+  }
+  // ikisi de silme
+  const aEnd = a.p + a.n;
+  const bEnd = b.p + b.n;
+  if (bEnd <= a.p) return { ...a, p: a.p - b.n };
+  if (b.p >= aEnd) return a;
+  const overlap = Math.min(aEnd, bEnd) - Math.max(a.p, b.p);
+  const n = a.n - overlap;
+  if (n <= 0) return null;
+  return { ...a, p: Math.min(a.p, b.p), n };
+}
+const applyOp = (doc, o) => (o.t === 'ins' ? doc.slice(0, o.p) + o.s + doc.slice(o.p) : doc.slice(0, o.p) + doc.slice(o.p + o.n));
+
+function codecollab({ op, send }) {
+  let doc = '// Birlikte kodlayın! Herkes aynı anda yazabilir.\n// ▶ Çalıştır çıktısı alttaki terminalde herkese görünür.\n\nconsole.log("Merhaba Biscord!");\n';
+  let version = 0;
+  let lang = 'js';
+  const history = [];
+  return {
+    max: 20,
+    join() { send(); },
+    leave(uid) { op({ cmd: 'cursor', uid, pos: null }); },
+    input(uid, d) {
+      if (d?.cmd === 'op') {
+        let o = d.op;
+        if (!o || !['ins', 'del'].includes(o.t)) return;
+        o = o.t === 'ins' ? { t: 'ins', p: Math.trunc(o.p), s: String(o.s).slice(0, 5000) } : { t: 'del', p: Math.trunc(o.p), n: Math.trunc(o.n) };
+        const base = Math.trunc(d.base);
+        if (!(base >= version - history.length && base <= version)) return op({ cmd: 'resync', uid, doc, version });
+        for (const h of history.slice(history.length - (version - base))) { o = transform(o, h.op); if (!o) break; }
+        if (o) {
+          o.p = Math.max(0, Math.min(doc.length, o.p));
+          if (o.t === 'del') o.n = Math.max(0, Math.min(doc.length - o.p, o.n));
+          if (doc.length + (o.t === 'ins' ? o.s.length : 0) > 100000) return;
+          doc = applyOp(doc, o);
+        }
+        version++;
+        history.push({ op: o || { t: 'ins', p: 0, s: '' } });
+        if (history.length > 500) history.shift();
+        op({ cmd: 'op', uid, op: o || { t: 'ins', p: 0, s: '' }, version, ack: d.seq });
+      } else if (d?.cmd === 'cursor') {
+        op({ cmd: 'cursor', uid, pos: Math.trunc(d.pos), sel: Math.trunc(d.sel || d.pos) });
+      } else if (d?.cmd === 'lang' && ['js', 'py'].includes(d.lang)) {
+        lang = d.lang;
+        op({ cmd: 'lang', lang, uid });
+      } else if (d?.cmd === 'out') {
+        op({ cmd: 'out', uid, lines: (d.lines || []).slice(0, 200).map((l) => ({ type: String(l.type).slice(0, 10), text: String(l.text).slice(0, 2000) })) });
+      } else if (d?.cmd === 'run') op({ cmd: 'run', uid, lang });
+    },
+    snapshot() { return { doc, version, lang }; },
+    destroy() {},
+  };
+}
+
+// ---------------------------------------------------------------- Beat Yapıcı (adım sıralayıcı)
+function beats({ op, send }) {
+  const TRACKS = 8;
+  const STEPS = 16;
+  const grid = Array.from({ length: TRACKS }, () => Array(STEPS).fill(false));
+  const s = { bpm: 110, playing: false, start_at: 0, kit: '808' };
+  return {
+    max: 30,
+    join() { send(); },
+    leave() {},
+    input(uid, d) {
+      if (d?.cmd === 'toggle') {
+        const t = Math.trunc(d.t);
+        const st = Math.trunc(d.s);
+        if (t < 0 || t >= TRACKS || st < 0 || st >= STEPS) return;
+        grid[t][st] = !grid[t][st];
+        op({ cmd: 'cell', t, s: st, v: grid[t][st], uid });
+      } else if (d?.cmd === 'bpm') {
+        s.bpm = Math.max(60, Math.min(200, Math.trunc(d.bpm) || 110));
+        if (s.playing) s.start_at = Date.now() + 150;
+        op({ cmd: 'transport', ...s, server_now: Date.now() });
+      } else if (d?.cmd === 'play' || d?.cmd === 'stop') {
+        s.playing = d.cmd === 'play';
+        s.start_at = Date.now() + 300;
+        op({ cmd: 'transport', ...s, server_now: Date.now() });
+      } else if (d?.cmd === 'kit' && ['808', '8bit', 'rock'].includes(d.kit)) {
+        s.kit = d.kit;
+        op({ cmd: 'transport', ...s, server_now: Date.now() });
+      } else if (d?.cmd === 'clear') {
+        grid.forEach((row) => row.fill(false));
+        send();
+      }
+    },
+    snapshot() { return { grid, ...s, server_now: Date.now() }; },
+    destroy() {},
+  };
+}
+
+// ---------------------------------------------------------------- Hacker Düellosu
+const HACK_LINES = [
+  'sudo rm -rf /var/log/izler', 'nmap -sS 10.0.0.0/24', 'ssh root@192.168.1.42 -p 2222', 'chmod 777 /etc/shadow',
+  'git push --force origin main', 'cat /dev/urandom | head -c 64', 'iptables -A INPUT -j DROP', 'curl -X POST api/v1/selfdestruct',
+  'kill -9 $(pidof firewall)', 'echo 0xDEADBEEF > /proc/kernel', 'docker exec -it core /bin/sh', 'ping -c 4 8.8.8.8',
+  'openssl enc -aes-256-cbc -in sırlar.txt', 'nc -lvnp 4444', 'tail -f /var/log/auth.log', 'systemctl stop antivirus',
+  'python3 -m http.server 8080', 'export PATH=/tmp/hack:$PATH', 'traceroute biscord.local', 'hashcat -m 0 hash.txt sözlük.txt',
+];
+function hackduel({ op, send }) {
+  const s = { phase: 'lobby', players: [], hp: {}, line: null, round: 0, winner: null, progress: {} };
+  let timer = null;
+  const nextLine = () => {
+    s.round++;
+    s.line = HACK_LINES[Math.floor(Math.random() * HACK_LINES.length)];
+    s.progress = {};
+    s.phase = 'round';
+    send();
+  };
+  return {
+    max: 20,
+    join(uid) { if (s.players.length < 2 && !s.players.includes(uid)) { s.players.push(uid); s.hp[uid] = 100; } send(); },
+    leave(uid) {
+      if (s.players.includes(uid) && s.phase === 'round') { s.phase = 'end'; s.winner = s.players.find((p) => p !== uid) || null; }
+      s.players = s.players.filter((p) => p !== uid);
+      send();
+    },
+    input(uid, d) {
+      if (d?.cmd === 'start' && s.players.length === 2 && s.phase !== 'round' && s.phase !== 'countdown') {
+        for (const p of s.players) s.hp[p] = 100;
+        s.round = 0; s.winner = null; s.phase = 'countdown';
+        send();
+        clearTimeout(timer);
+        timer = setTimeout(nextLine, 3000);
+      } else if (d?.cmd === 'progress' && s.phase === 'round' && s.players.includes(uid)) {
+        op({ cmd: 'progress', uid, n: Math.min(200, Math.trunc(d.n) || 0) });
+      } else if (d?.cmd === 'submit' && s.phase === 'round' && s.players.includes(uid)) {
+        if (String(d.text) !== s.line) { s.hp[uid] = Math.max(0, s.hp[uid] - 5); op({ cmd: 'miss', uid, hp: s.hp[uid] }); }
+        else {
+          const foe = s.players.find((p) => p !== uid);
+          s.hp[foe] = Math.max(0, s.hp[foe] - 25);
+          op({ cmd: 'hit', uid, foe, hp: s.hp[foe] });
+          if (s.hp[foe] <= 0) { s.phase = 'end'; s.winner = uid; send(); return; }
+          s.phase = 'between';
+          send();
+          clearTimeout(timer);
+          timer = setTimeout(nextLine, 1200);
+        }
+        if (s.hp[uid] <= 0) { s.phase = 'end'; s.winner = s.players.find((p) => p !== uid); send(); }
+      }
+    },
+    snapshot() { return { ...s }; },
+    destroy() { clearTimeout(timer); },
+  };
+}
+
+// ---------------------------------------------------------------- Piksel Lobi (konumlar)
+function lobby({ op, send }) {
+  const pos = new Map();
+  return {
+    max: 40,
+    join(uid) { if (!pos.has(uid)) pos.set(uid, { x: 9 + Math.random() * 2, y: 10, dir: 'u', emote: null }); send(); },
+    leave(uid) { pos.delete(uid); op({ cmd: 'gone', uid }); },
+    input(uid, d) {
+      const p = pos.get(uid);
+      if (!p) return;
+      if (d?.cmd === 'move') {
+        p.x = Math.max(0.5, Math.min(23.5, Number(d.x) || p.x));
+        p.y = Math.max(0.5, Math.min(15.5, Number(d.y) || p.y));
+        p.dir = ['u', 'd', 'l', 'r'].includes(d.dir) ? d.dir : p.dir;
+        op({ cmd: 'move', uid, x: +p.x.toFixed(2), y: +p.y.toFixed(2), dir: p.dir });
+      } else if (d?.cmd === 'emote') {
+        op({ cmd: 'emote', uid, e: String(d.e || '👋').slice(0, 8) });
+      }
+    },
+    snapshot() { return { pos: Object.fromEntries(pos) }; },
+    destroy() {},
+  };
+}
+
+const ENGINES = { trivia, snake, arena, watch, whiteboard, desktop, code: codecollab, beats, hackduel, lobby };
+const NAMES = {
+  trivia: 'Bilgi Yarışması', snake: 'ASCII Yılan', arena: 'Arena', watch: 'Birlikte İzleme', whiteboard: 'Çizim Tahtası',
+  desktop: 'Sanal Masaüstü', code: 'Ortak Kod', beats: 'Beat Yapıcı', hackduel: 'Hacker Düellosu', lobby: 'Piksel Lobi',
+};
 
 module.exports = (ctx) => {
   const { io, q, fail, channelAccess, channelRooms, has, P, now } = ctx;
@@ -362,9 +630,10 @@ module.exports = (ctx) => {
   ctx.hooks.socket.push((socket, uid, safe) => {
     socket.on('act:start', safe((d) => {
       const ch = channelAccess(uid, String(d?.channel_id));
-      if (!['text', 'voice', 'dm'].includes(ch.type)) fail(400, 'Bu kanalda etkinlik başlatılamaz');
+      if (!['text', 'voice', 'dm', 'lobby'].includes(ch.type)) fail(400, 'Bu kanalda etkinlik başlatılamaz');
       const type = String(d?.type);
       if (!ENGINES[type]) fail(400, 'Bilinmeyen etkinlik');
+      if ((type === 'lobby') !== (ch.type === 'lobby')) fail(400, 'Piksel lobi yalnızca lobi kanallarında çalışır');
       if (ch.server_id) {
         const s = q.get('SELECT activities, watch_party FROM servers WHERE id=?', ch.server_id);
         if (type === 'watch' && !s.watch_party) fail(403, 'Birlikte izleme bu sunucuda kapalı (Sunucu Ayarları → Özellikler)');
@@ -381,7 +650,9 @@ module.exports = (ctx) => {
           if (acts.get(a.channel_id) === a) io.to('act:' + a.channel_id).emit('act:state', { channel_id: a.channel_id, type: a.type, host: a.host, state: a.engine.snapshot() });
         });
       };
-      a.engine = ENGINES[type]({ send, host: () => a.host });
+      // anlık işlem (çizim, imleç, hareket): tam durum yerine yalnızca değişikliği yayınla
+      const op = (data) => { if (acts.get(a.channel_id) === a) io.to('act:' + a.channel_id).emit('act:op', { channel_id: a.channel_id, op: data }); };
+      a.engine = ENGINES[type]({ send, op, host: () => a.host });
       acts.set(ch.id, a);
       socket.join('act:' + ch.id);
       a.players.set(uid, socket.id);
@@ -440,3 +711,5 @@ module.exports = (ctx) => {
 };
 
 module.exports.parseVideo = parseVideo;
+module.exports.transform = transform;
+module.exports.applyOp = applyOp;

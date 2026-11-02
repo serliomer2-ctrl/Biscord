@@ -778,20 +778,30 @@ Bana şunları gönder:
 
 ## Bölüm 17 — Sürüm 2 özelliklerinin ayarları
 
-### 17.1 İlk yönetici girişi (`admin` / `admin`)
+### 17.1 Yönetici hesabı (`Adminolmakben`)
 
-1. Site ilk açıldığında Biscord kendiliğinden bir yönetici hesabı oluşturur.
-2. Giriş ekranında **Kullanıcı Adı:** `admin`, **Şifre:** `admin` yaz.
-3. **"Şifreni değiştir"** ekranı açılır. Mevcut şifre: `admin`. Yeni şifre en az 8 karakter olmalı ve `admin` ile başlamamalı.
-4. Artık sol alttaki profiline tıkla → **Yönetim Paneli**.
+Yönetici şifresi **koda yazılmaz**; depo herkese açık olduğu için şifreyi yalnızca GoDaddy'nin gizli ortam değişkenlerine gireceksin.
 
-> ⚠️ Bunu siteyi yayınladıktan hemen sonra yap. `admin/admin` herkesin tahmin edebileceği bir şifredir; sen değiştirene kadar başkası da deneyebilir.
->
-> Daha da güvenlisi: GoDaddy ortam değişkenlerine `ADMIN_PASSWORD` = güçlü bir şifre ekle. Hesap ilk açılışta doğrudan bu şifreyle oluşur. Bu değişken **yalnızca hiç yönetici yokken**, yani ilk açılışta etkilidir.
+1. GoDaddy → **biscord** uygulaması → **Ortam Değişkenleri / Environment Variables** → şunları ekle:
+
+   | Değişken | Değer | Gizli mi? |
+   |---|---|---|
+   | `ADMIN_USERNAME` | `Adminolmakben` | Hayır |
+   | `ADMIN_PASSWORD` | Yönetici şifren | ✅ **Evet, gizli olarak işaretle** |
+
+2. Uygulamayı **Yeniden Başlat / Restart**.
+3. Siteyi aç → **Kullanıcı Adı:** `Adminolmakben` (büyük/küçük harf fark etmez), **Şifre:** belirlediğin şifre.
+4. Sol alttaki profiline tıkla → **Yönetim Paneli**.
+
+> - Hesap yalnızca **henüz yoksa** oluşturulur. Sonradan şifreyi değiştirmek için Biscord içinden **Ayarlar → Hesabım → Şifreyi Değiştir** kullan; ortam değişkenini değiştirmek mevcut şifreyi değiştirmez.
+> - `ADMIN_PASSWORD` eklemeden siteyi açarsan geçici şifre `admin` olur ve ilk girişte değiştirmen zorunlu olur. Bunu yayından hemen sonra yap.
+> - Bilgisayarındaki `D:\Biscord\.env` dosyasında da aynı şifre yazılı; bu dosya GitHub'a **gönderilmez**.
 
 ### 17.2 E-posta ayarı (şifre sıfırlama, giriş kodları)
 
-Biscord e-postaları kendi e-posta hesabın üzerinden gönderir. En kolayı **Gmail**:
+**Önerilen yol: Brevo.** Adım adım anlatım ayrı bir dosyada: [BREVO-KURULUM.md](BREVO-KURULUM.md). Kısaca GoDaddy ortam değişkenlerine `BREVO_API_KEY` ve `MAIL_FROM` eklemen yeterli.
+
+Brevo yerine **Gmail** kullanmak istersen (GoDaddy SMTP portlarını engelliyorsa çalışmayabilir):
 
 1. Gmail hesabında **iki adımlı doğrulamayı** aç: myaccount.google.com → **Güvenlik** → **2 Adımlı Doğrulama**.
 2. Aynı sayfada **Uygulama şifreleri**ni aç (arama kutusuna "Uygulama şifreleri" yazabilirsin).
